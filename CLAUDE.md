@@ -95,6 +95,12 @@ Two hooks to override:
   neither is what you are changing — hence the merged body.  `is_blocked` is only taken
   on the `PUT`, so a user the model wants blocked from the start needs a create
   followed by an update.
+- `PUT /api/peers/{id}` **replaces** the keys it takes: one left out of the body is read
+  as its go zero value and written, so `{"name": "x"}` silently resets `ssh_enabled` to
+  false.  It also requires `name` on every call (`500` without).  There is no
+  `POST /api/peers` — a peer registers itself, so `create_resource` raises
+  `SkipResource`.  `approval_required` and `extra_dns_labels` are accepted and silently
+  ignored; don't model a key the api drops, it can never converge.
 - A **service user has no email address**: the api stores `""` whatever you send.  Its
   `name` is the only thing left to identify it, which is why `netbird::User` is indexed
   on the name for regular and service users alike.
