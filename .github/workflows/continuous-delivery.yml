@@ -1,0 +1,153 @@
+name: Publish Python 🐍 distribution 📦 to PyPI and TestPyPI
+
+on: push
+
+jobs:
+  build:
+    name: Build distribution 📦
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.13
+        architecture: 'x64'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v8.3.2
+
+    - name: Install inmanta-core
+      run: |
+        uv venv
+        uv pip install inmanta-core
+
+    - name: Build a binary wheel
+      run: uv run inmanta module build
+
+    - name: Store the distribution packages
+      uses: actions/upload-artifact@v7
+      with:
+        name: python-package-distributions
+        path: dist/
+
+  publish-to-pypi:
+    name: >-
+      Publish Python 🐍 distribution 📦 to PyPI
+    if: startsWith(github.ref, 'refs/tags/')  # only publish to PyPI on tag pushes
+    needs:
+    - build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/inmanta-module-netbird
+    permissions:
+      id-token: write  # IMPORTANT: mandatory for trusted publishing
+
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v8
+      with:
+        name: python-package-distributions
+        path: dist/
+    - name: Publish distribution 📦 to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: >-
+      Sign the Python 🐍 distribution 📦 with Sigstore
+      and upload them to GitHub Release
+    needs:
+    - publish-to-pypi
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write  # IMPORTANT: mandatory for making GitHub Releases
+      id-token: write  # IMPORTANT: mandatory for sigstore
+
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v8
+      with:
+        name: python-package-distributions
+        path: dist/
+    - name: Sign the dists with Sigstore
+      uses: sigstore/gh-action-sigstore-python@v3.4.0
+      with:
+        inputs: >-
+          ./dist/*.whl
+    - name: Create GitHub Release
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: >-
+        gh release create
+        '${{ github.ref_name }}'
+        --repo '${{ github.repository }}'
+        --notes ""
+    - name: Upload artifact signatures to GitHub Release
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      # Upload to GitHub Release using the `gh` CLI.
+      # `dist/` contains the built packages, and the
+      # sigstore-produced signatures and certificates.
+      run: >-
+        gh release upload
+        '${{ github.ref_name }}' dist/**
+        --repo '${{ github.repository }}'
+
+  build-dev:
+    name: Build dev release of last commit
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.13
+        architecture: 'x64'
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v8.3.2
+
+    - name: Install inmanta-core
+      run: |
+        uv venv
+        uv pip install inmanta-core
+
+    - name: Build a binary wheel
+      run: uv run inmanta module build --dev
+
+    - name: Store the distribution packages
+      uses: actions/upload-artifact@v7
+      with:
+        name: python-package-distributions-dev
+        path: dist/
+
+  publish-to-testpypi:
+    name: Publish Python 🐍 distribution 📦 to TestPyPI
+    if: ${{ startsWith(github.ref, 'refs/heads/master') }}  # only publish to TestPyPI when it is not a release
+    needs:
+    - build-dev
+    runs-on: ubuntu-latest
+
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/inmanta-module-netbird
+
+    permissions:
+      id-token: write
+
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v8
+      with:
+        name: python-package-distributions-dev
+        path: dist/
+    - name: Publish distribution 📦 to TestPyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/

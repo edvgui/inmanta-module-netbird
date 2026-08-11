@@ -1,0 +1,5 @@
+include inmanta_plugins/netbird/setup.cfg
+include inmanta_plugins/netbird/py.typed
+recursive-include inmanta_plugins/netbird/model *.cf
+graft inmanta_plugins/netbird/files
+graft inmanta_plugins/netbird/templates
