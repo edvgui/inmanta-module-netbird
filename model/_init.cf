@@ -138,3 +138,100 @@ end
 index User(api, name)
 
 implement User using parents
+
+
+entity Network extends JsonObjectABC:
+    """
+    Manage a network of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/networks
+
+    A network on its own is an empty container: it is the resources
+    (`netbird::NetworkResource`) that say which addresses it gives access to, and the
+    routers (`netbird::NetworkRouter`) that say which peers route the traffic to them.
+    Both of them are addressed under the id of the network they belong to, which the
+    api hands out and the model reads back from `Network.id`.
+
+    :attr name: The name of the network, which is what identifies it.
+    :attr description: A free form description of the network.
+    """
+    string name
+    string? description = null
+end
+
+index Network(api, name)
+
+implement Network using parents
+
+
+entity NetworkResource extends JsonObjectABC:
+    """
+    Manage a resource of a network: an address, or a range of them, that the peers of
+    the groups it is in can reach through the routers of the network.
+
+    Api documentation: https://docs.netbird.io/api/resources/networks
+
+    :attr _network: The id of the network this resource belongs to.  It is not part of
+        the object the api holds, it is the network the resource is addressed under.
+    :attr name: The name of the resource, which is what identifies it.  The api allows
+        the same name in two networks, this module does not: the id of the network is
+        only known on the agent, so it can not take part in the identity of the
+        resource inmanta deploys.
+    :attr description: A free form description of the resource.
+    :attr address: The address the resource stands for: a host (`1.1.1.1`, `1.1.1.1/32`),
+        a subnet (`192.168.0.0/24`) or a domain (`example.com`, `*.example.com`).  The
+        api derives the type of the resource from it.
+    :attr enabled: Whether the resource is reachable through the network.
+    :attr groups: The ids of the groups the resource is in.  Those are the groups a
+        policy grants access to it with.
+    """
+    string _network
+    string name
+    string? description = null
+    string? address = null
+    bool? enabled = null
+    string[]? groups = null
+end
+
+index NetworkResource(api, name)
+
+implement NetworkResource using parents
+
+
+entity NetworkRouter extends JsonObjectABC:
+    """
+    Manage a router of a network: the peer, or the peers of the groups, that route the
+    traffic towards the resources of the network.
+
+    Api documentation: https://docs.netbird.io/api/resources/networks
+
+    The api gives a router no name of its own, it is only known by the peer or the
+    peer groups it routes for.  That is what the handler matches a router of the
+    network on, so a router that is made to route for another target is a new one, and
+    two routers of the same network can not route for the same target.
+
+    :attr _name: The name this model knows the router by.  The api does not store it,
+        it only identifies the resource inmanta deploys, and it must be unique.
+    :attr _network: The id of the network this router belongs to.  It is not part of
+        the object the api holds, it is the network the router is addressed under.
+    :attr peer: The id of the peer that routes the traffic.  Mutually exclusive with
+        `peer_groups`.
+    :attr peer_groups: The ids of the groups whose peers route the traffic.  Mutually
+        exclusive with `peer`.
+    :attr metric: The priority of this router among the routers of the network, the
+        lowest number first.
+    :attr masquerade: Whether the routing peers masquerade the traffic they route.
+    :attr enabled: Whether the router routes traffic.
+    """
+    string _name
+    string _network
+    string? peer = null
+    string[]? peer_groups = null
+    int? metric = null
+    bool? masquerade = null
+    bool? enabled = null
+end
+
+index NetworkRouter(api, _name)
+
+implement NetworkRouter using parents

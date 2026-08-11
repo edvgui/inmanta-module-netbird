@@ -17,6 +17,7 @@ Contact: edvgui@gmail.com
 """
 
 import copy
+import ipaddress
 import typing
 from dataclasses import asdict
 
@@ -367,5 +368,308 @@ class UserHandler(HandlerABC[UserResource]):
     ) -> None:
         process_netbird_response(
             self.session.delete(url=f"users/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
+
+
+# The keys of the network object the api takes, on a create as well as on an update.
+# Everything else it reports about a network (the routers, the resources and the
+# policies it holds) is computed from the objects that point at it, and can not be set
+# here.
+NETWORK_KEYS = ("name", "description")
+
+
+@inmanta.resources.resource("netbird::Network", "name", "api.agent_name")
+class Network(ResourceABC):
+    fields = ("name",)
+    name: str
+
+
+@inmanta.agent.handler.provider("netbird::Network", "")
+class NetworkHandler(HandlerABC[Network]):
+    def diff_body(self, body: dict) -> dict:
+        # The lists of routers, resources and policies of a network are computed by
+        # the api from the objects that point at it: they would show up as a change on
+        # every deploy that no call could ever enforce.
+        return select(body, NETWORK_KEYS)
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: Network,
+    ) -> None:
+        networks = process_netbird_response(
+            self.session.get(url="networks"),
+            expected_type=list[dict],
+        )
+        network = next((n for n in networks if n["name"] == resource.name), None)
+        if network is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", network["id"])
+        self.publish_ids(ctx, id=network["id"])
+
+        resource.body = self.normalize(network)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: Network,
+    ) -> None:
+        network = process_netbird_response(
+            self.session.post(
+                url="networks",
+                json=select(self.merged_body({}, resource), NETWORK_KEYS),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=network["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: Network,
+    ) -> None:
+        process_netbird_response(
+            self.session.put(
+                url=f"networks/{ctx.get('ID')}",
+                json=select(resource.body, NETWORK_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: Network,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(url=f"networks/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
+
+
+# The keys of a network resource the api takes, on a create as well as on an update.
+# The type of the resource is not one of them: the api derives it from the address.
+NETWORK_RESOURCE_KEYS = ("name", "description", "address", "enabled", "groups")
+
+
+@inmanta.resources.resource("netbird::NetworkResource", "name", "api.agent_name")
+class NetworkResource(ResourceABC):
+    # The network a resource belongs to is not part of the object the api holds, it is
+    # the url the object is addressed under.  The model only knows it as a reference
+    # to the id its network publishes, which is resolved here, on the agent.
+    fields = ("name", "network")
+    name: str
+    network: str
+
+    @classmethod
+    def get_network(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity._network
+
+
+@inmanta.agent.handler.provider("netbird::NetworkResource", "")
+class NetworkResourceHandler(HandlerABC[NetworkResource]):
+    def diff_body(self, body: dict) -> dict:
+        # The type the api derived from the address is not something the model can
+        # set, and the id of the object doesn't take part in the diff either.
+        return select(body, NETWORK_RESOURCE_KEYS)
+
+    def normalize(self, body: dict) -> dict:
+        # The api stores a host address as the network it is alone in, and reports it
+        # that way: `1.1.1.1` comes back as `1.1.1.1/32`, which is the same address.
+        address = body.get("address")
+        if isinstance(address, str) and "/" not in address:
+            try:
+                prefix_length = ipaddress.ip_address(address).max_prefixlen
+            except ValueError:
+                # A domain, which the api keeps as it is
+                pass
+            else:
+                body["address"] = f"{address}/{prefix_length}"
+
+        # The api reports the groups of a resource as objects while it takes them as
+        # ids, it doesn't preserve their order, and it reports a resource that is in no
+        # group at all with no list rather than an empty one.
+        if "groups" in body:
+            body["groups"] = sorted(
+                group["id"] if isinstance(group, dict) else group
+                for group in body["groups"] or []
+            )
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NetworkResource,
+    ) -> None:
+        resources = process_netbird_response(
+            self.session.get(url=f"networks/{resource.network}/resources"),
+            expected_type=list[dict],
+        )
+        current = next((r for r in resources if r["name"] == resource.name), None)
+        if current is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", current["id"])
+        self.publish_ids(ctx, id=current["id"])
+
+        resource.body = self.normalize(current)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NetworkResource,
+    ) -> None:
+        current = process_netbird_response(
+            self.session.post(
+                url=f"networks/{resource.network}/resources",
+                json=select(self.merged_body({}, resource), NETWORK_RESOURCE_KEYS),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=current["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: NetworkResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.put(
+                url=f"networks/{resource.network}/resources/{ctx.get('ID')}",
+                json=select(resource.body, NETWORK_RESOURCE_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NetworkResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(
+                url=f"networks/{resource.network}/resources/{ctx.get('ID')}"
+            ),
+        )
+        ctx.set_purged()
+
+
+# The keys of a network router the api takes, on a create as well as on an update.
+NETWORK_ROUTER_KEYS = ("peer", "peer_groups", "metric", "masquerade", "enabled")
+
+
+def routing_target(body: dict) -> tuple[str | None, list[str]]:
+    """
+    The peer, or the peer groups, a router routes for.  The api gives a router no name
+    of its own, this is the only thing it is known by.
+
+    :param body: A router, as the api holds it or as the model wants it.
+    """
+    return body.get("peer") or None, sorted(body.get("peer_groups") or [])
+
+
+@inmanta.resources.resource("netbird::NetworkRouter", "name", "api.agent_name")
+class NetworkRouter(ResourceABC):
+    # The api knows a router by the target it routes for, which the model only knows
+    # as references resolved on the agent.  The name is what identifies the resource
+    # inmanta deploys, and the network is the url the router is addressed under.
+    fields = ("name", "network")
+    name: str
+    network: str
+
+    @classmethod
+    def get_name(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity._name
+
+    @classmethod
+    def get_network(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity._network
+
+
+@inmanta.agent.handler.provider("netbird::NetworkRouter", "")
+class NetworkRouterHandler(HandlerABC[NetworkRouter]):
+    def diff_body(self, body: dict) -> dict:
+        return select(body, NETWORK_ROUTER_KEYS)
+
+    def normalize(self, body: dict) -> dict:
+        # The api doesn't preserve the order of the peer groups
+        if body.get("peer_groups") is not None:
+            body["peer_groups"] = sorted(body["peer_groups"])
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NetworkRouter,
+    ) -> None:
+        routers = process_netbird_response(
+            self.session.get(url=f"networks/{resource.network}/routers"),
+            expected_type=list[dict],
+        )
+        # A router is only known by what it routes for, so that is what the desired
+        # state is matched on: a router that should route for another target is a new
+        # one, not an update of this one.
+        target = routing_target(self.merged_body({}, resource))
+        router = next((r for r in routers if routing_target(r) == target), None)
+        if router is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", router["id"])
+        self.publish_ids(ctx, id=router["id"])
+
+        resource.body = self.normalize(router)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NetworkRouter,
+    ) -> None:
+        router = process_netbird_response(
+            self.session.post(
+                url=f"networks/{resource.network}/routers",
+                json=select(self.merged_body({}, resource), NETWORK_ROUTER_KEYS),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=router["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: NetworkRouter,
+    ) -> None:
+        process_netbird_response(
+            self.session.put(
+                url=f"networks/{resource.network}/routers/{ctx.get('ID')}",
+                json=select(resource.body, NETWORK_ROUTER_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NetworkRouter,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(
+                url=f"networks/{resource.network}/routers/{ctx.get('ID')}"
+            ),
         )
         ctx.set_purged()
