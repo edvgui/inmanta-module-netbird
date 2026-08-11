@@ -369,3 +369,118 @@ class UserHandler(HandlerABC[UserResource]):
             self.session.delete(url=f"users/{ctx.get('ID')}"),
         )
         ctx.set_purged()
+
+
+def find_setup_key(session: Session, name: str) -> dict | None:
+    """
+    Find a setup key of the account by its name, and return None if it doesn't exist.
+
+    The api allows several keys to carry the same name and only tells them apart by
+    their id, which the model never knows: this module uses the name as the identity
+    of a key, and manages the first one the listing reports.
+    """
+    setup_keys = process_netbird_response(
+        session.get(url="setup-keys"),
+        expected_type=list[dict],
+    )
+    return next((k for k in setup_keys if k["name"] == name), None)
+
+
+# The keys of the setup key object the api takes when a key is created, and the ones
+# it takes when an existing key is updated.  Nearly everything about a key is fixed
+# at creation: only its revocation and its auto groups can be changed afterwards.
+SETUP_KEY_CREATE_KEYS = (
+    "name",
+    "type",
+    "expires_in",
+    "revoked",
+    "auto_groups",
+    "usage_limit",
+    "ephemeral",
+    "allow_extra_dns_labels",
+)
+SETUP_KEY_UPDATE_KEYS = ("revoked", "auto_groups")
+
+
+@inmanta.resources.resource("netbird::SetupKey", "name", "api.agent_name")
+class SetupKeyResource(ResourceABC):
+    fields = ("name",)
+    name: str
+
+
+@inmanta.agent.handler.provider("netbird::SetupKey", "")
+class SetupKeyHandler(HandlerABC[SetupKeyResource]):
+    def diff_body(self, body: dict) -> dict:
+        # The api only takes SETUP_KEY_UPDATE_KEYS on an update, so the values it only
+        # accepts at creation are kept out of the diff: the handler could not enforce
+        # a change to them anyway.  That also covers expires_in, which the api takes
+        # as a duration but reports back as the expires timestamp, and would show up
+        # as a change on every deploy if it took part in the diff.
+        return select(body, SETUP_KEY_UPDATE_KEYS)
+
+    def normalize(self, body: dict) -> dict:
+        # The api doesn't preserve the order of the auto groups
+        if body.get("auto_groups") is not None:
+            body["auto_groups"] = sorted(body["auto_groups"])
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: SetupKeyResource,
+    ) -> None:
+        setup_key = find_setup_key(self.session, resource.name)
+        if setup_key is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", setup_key["id"])
+        self.publish_ids(ctx, id=setup_key["id"])
+
+        resource.body = self.normalize(setup_key)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: SetupKeyResource,
+    ) -> None:
+        desired = self.merged_body({}, resource)
+        setup_key = process_netbird_response(
+            self.session.post(
+                url="setup-keys",
+                json=select(desired, SETUP_KEY_CREATE_KEYS),
+            ),
+            expected_type=dict,
+        )
+        # This response is the only place the api ever shows the generated key in
+        # clear, it is masked everywhere else.  It is a secret, and this module only
+        # ever publishes ids: whoever needs the key reads it from the api itself.
+        self.publish_ids(ctx, id=setup_key["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: SetupKeyResource,
+    ) -> None:
+        # The body calculate_diff merged is the object as the api holds it, with the
+        # desired state applied on top.  The api only takes part of it on an update,
+        # and requires both of the values it does take on every call.
+        process_netbird_response(
+            self.session.put(
+                url=f"setup-keys/{ctx.get('ID')}",
+                json=select(resource.body, SETUP_KEY_UPDATE_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: SetupKeyResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(url=f"setup-keys/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
