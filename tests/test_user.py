@@ -17,6 +17,7 @@ Contact: edvgui@gmail.com
 """
 
 import collections.abc
+import json
 
 import inmanta_plugins.std
 import pytest_inmanta.plugin
@@ -44,29 +45,19 @@ def user_model(**attributes: object) -> str:
     """
     Build a user resource, with only the attributes the test has an opinion about:
     everything else is left null, and is therefore not managed.
+
+    The values are serialized as json, which the dsl takes as is for the primitive
+    values a netbird object is made of.
     """
     return "\n".join(
         [
             "user = netbird::User(",
             "    api=api,",
-            f"    name={USER_NAME!r},",
-            *(f"    {key}={value}," for key, value in attributes.items()),
+            f"    name={json.dumps(USER_NAME)},",
+            *(f"    {key}={json.dumps(value)}," for key, value in attributes.items()),
             ")",
         ]
     )
-
-
-def dsl(value: object) -> str:
-    """
-    Render a python value as the inmanta literal it maps onto.
-    """
-    match value:
-        case bool():
-            return str(value).lower()
-        case list():
-            return "[" + ", ".join(dsl(item) for item in value) + "]"
-        case _:
-            return repr(value)
 
 
 def test_user_created_updated_and_purged(
@@ -79,7 +70,7 @@ def test_user_created_updated_and_purged(
     are kept in line with the model, and the user is removed when the resource is
     purged.
     """
-    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+    compile_model(user_model(email=USER_EMAIL, role="user"))
     project.deploy_resource("netbird::User")
 
     user = find_user(netbird, USER_NAME)
@@ -93,14 +84,14 @@ def test_user_created_updated_and_purged(
     assert user["is_service_user"] is False
 
     # A second deploy of the same desired state changes nothing.
-    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+    compile_model(user_model(email=USER_EMAIL, role="user"))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
 
-    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("admin")))
+    compile_model(user_model(email=USER_EMAIL, role="admin"))
     project.deploy_resource("netbird::User")
     assert find_user(netbird, USER_NAME)["role"] == "admin"
 
-    compile_model(user_model(email=dsl(USER_EMAIL), is_blocked=dsl(True)))
+    compile_model(user_model(email=USER_EMAIL, is_blocked=True))
     project.deploy_resource("netbird::User")
     blocked = find_user(netbird, USER_NAME)
     assert blocked["is_blocked"] is True
@@ -108,7 +99,7 @@ def test_user_created_updated_and_purged(
     # one the account holds is carried along instead of being reset.
     assert blocked["role"] == "admin"
 
-    compile_model(user_model(purged=dsl(True)))
+    compile_model(user_model(purged=True))
     project.deploy_resource("netbird::User")
     assert find_user(netbird, USER_NAME) is None
 
@@ -125,22 +116,14 @@ def test_user_auto_groups(
     """
     all_group = group_id(netbird, DEFAULT_GROUP)
 
-    compile_model(
-        user_model(
-            email=dsl(USER_EMAIL), role=dsl("user"), auto_groups=dsl([all_group])
-        )
-    )
+    compile_model(user_model(email=USER_EMAIL, role="user", auto_groups=[all_group]))
     project.deploy_resource("netbird::User")
     assert find_user(netbird, USER_NAME)["auto_groups"] == [all_group]
 
-    compile_model(
-        user_model(
-            email=dsl(USER_EMAIL), role=dsl("user"), auto_groups=dsl([all_group])
-        )
-    )
+    compile_model(user_model(email=USER_EMAIL, role="user", auto_groups=[all_group]))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
 
-    compile_model(user_model(email=dsl(USER_EMAIL), auto_groups=dsl([])))
+    compile_model(user_model(email=USER_EMAIL, auto_groups=[]))
     project.deploy_resource("netbird::User")
     assert find_user(netbird, USER_NAME)["auto_groups"] == []
 
@@ -155,7 +138,7 @@ def test_service_user_created_and_purged(
     keeps no email address for it.  The name is what identifies every user here, so
     the same resource manages it, and a redeploy doesn't create a second one.
     """
-    compile_model(user_model(role=dsl("admin"), is_service_user=dsl(True)))
+    compile_model(user_model(role="admin", is_service_user=True))
     project.deploy_resource("netbird::User")
 
     user = find_user(netbird, USER_NAME)
@@ -164,13 +147,13 @@ def test_service_user_created_and_purged(
     assert user["email"] == ""
     assert user["role"] == "admin"
 
-    compile_model(user_model(role=dsl("admin"), is_service_user=dsl(True)))
+    compile_model(user_model(role="admin", is_service_user=True))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
     assert [u["name"] for u in get(netbird, "users") if u["is_service_user"]] == [
         USER_NAME
     ]
 
-    compile_model(user_model(purged=dsl(True)))
+    compile_model(user_model(purged=True))
     project.deploy_resource("netbird::User")
     assert find_user(netbird, USER_NAME) is None
 
@@ -185,7 +168,7 @@ def test_attributes_left_null_are_not_managed(
     it, even when it was changed in the dashboard behind our back.  And a value the
     model does set is enforced, dashboard or not.
     """
-    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+    compile_model(user_model(email=USER_EMAIL, role="user"))
     project.deploy_resource("netbird::User")
 
     user = find_user(netbird, USER_NAME)
@@ -195,11 +178,11 @@ def test_attributes_left_null_are_not_managed(
     ).raise_for_status()
 
     # The blocked flag isn't managed: the deploy leaves it as it is.
-    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+    compile_model(user_model(email=USER_EMAIL, role="user"))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
     assert find_user(netbird, USER_NAME)["is_blocked"] is True
 
-    compile_model(user_model(email=dsl(USER_EMAIL), is_blocked=dsl(False)))
+    compile_model(user_model(email=USER_EMAIL, is_blocked=False))
     project.deploy_resource("netbird::User")
     assert find_user(netbird, USER_NAME)["is_blocked"] is False
 
@@ -215,11 +198,11 @@ def test_create_only_attributes_are_not_enforced(
     and a later change to it is not something the handler could enforce: it must not
     show up as a change on every deploy.
     """
-    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+    compile_model(user_model(email=USER_EMAIL, role="user"))
     project.deploy_resource("netbird::User")
     assert find_user(netbird, USER_NAME)["email"] == USER_EMAIL
 
-    compile_model(user_model(email=dsl("alice.cooper@example.com"), role=dsl("user")))
+    compile_model(user_model(email="alice.cooper@example.com", role="user"))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
     assert find_user(netbird, USER_NAME)["email"] == USER_EMAIL
 
@@ -234,7 +217,7 @@ def test_id_is_a_fact_reference(
     facts the handler publishes, so another resource can point at this user without
     going digging through the api.
     """
-    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+    compile_model(user_model(email=USER_EMAIL, role="user"))
 
     (user,) = project.get_instances("netbird::User")
     object_id = inmanta.plugins.allow_reference_values(user).id
