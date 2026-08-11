@@ -102,7 +102,16 @@ Two hooks to override:
   a boolean query parameter; a non-boolean value is not a "give me everything" wildcard.
 - A listing endpoint with nothing to list can answer json `null` instead of `[]` —
   `process_netbird_response` turns that into `[]` for a `list[...]` expected type.
-- A fresh account already has an `All` group and a `Default` policy.
+- A fresh account already has an `All` group and a `Default` policy.  The api refuses to
+  rename it (422) or to delete it (400).
+- `GET /api/groups` reports `peers` as a list of `{id, name}` objects, but `POST`/`PUT`
+  only take a list of peer ids and answer 400 on the shape the api returned itself.  An
+  empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
+  account doesn't know is dropped silently.  `PUT /api/groups/{id}` replaces the whole
+  group: a key left out of it is emptied.
+- Only one netbird server can run on a host at a time: it binds a hardcoded `:33073` for
+  the management grpc, which the config file does not move.  Two `--network host`
+  containers therefore fight over it, and the second one exits.
 
 ## Testing
 
