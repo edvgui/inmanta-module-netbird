@@ -33,28 +33,39 @@ jobs:
           flake8 tests inmanta_plugins
           pyupgrade --py312-plus $(find inmanta_plugins tests -type f -name '*.py')
 
+      - name: Type check with mypy
+        run: |
+          source .venv/bin/activate
+          make mypy-plugins
+
   tests:
 
     runs-on: ubuntu-latest
+    # Run inside a podman container: the tests deploy a netbird server locally, in a
+    # container of their own, and need a working podman to do so.
+    container:
+      image: quay.io/podman/stable:latest
+      options: --privileged
 
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.13
-          architecture: 'x64'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.3.2
-
-      - name: Install module and its dependencies
-        run: |
-          uv venv
-          uv pip install -r requirements.dev.txt -e . -c requirements.txt
+      - name: Install system dependencies
+        # curl to bootstrap uv, python to run the tests with
+        run: dnf install -y curl python3.13
 
       - name: Run tests
+        # Rootless podman refuses to run as root, so run the whole test suite as the
+        # image's unprivileged ``podman`` user.
         run: |
+          chown -R podman:podman .
+          su podman -c bash <<'EOF'
+          set -e
+          export HOME=/home/podman
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv --python 3.13
+          uv pip install -r requirements.dev.txt -e . -c requirements.txt
           source .venv/bin/activate
           pytest tests -vvv --log-cli-level debug
+          EOF
