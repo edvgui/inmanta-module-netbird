@@ -15,6 +15,7 @@
 
     Contact: edvgui@gmail.com
 """
+import files::json
 
 
 entity Api:
@@ -23,12 +24,13 @@ entity Api:
 
     :attr agent_name: The name of the agent deploying the resources reachable
         through this api.
-    :attr server_url: The base url of the netbird management api.
-    :attr token: The token used to authenticate against the management api.
+    :attr management_url: The base url of the netbird management server, without
+        the `/api` suffix.  Self-hosted deployments use their own url.
+    :attr api_token: A personal access token, authorized to manage the account.
     """
     string agent_name
-    string server_url = "https://api.netbird.io"
-    string token
+    string management_url = "https://api.netbird.io"
+    string api_token
 end
 
 index Api(agent_name)
@@ -36,14 +38,15 @@ index Api(agent_name)
 implement Api using std::none
 
 
-entity ResourceABC extends std::PurgeableResource, std::ManagedResource:
+entity ResourceABC extends std::PurgeableResource, std::ManagedResource, files::json::JsonResource:
     """
     Base resource for all netbird resources.
 
-    :attr name: The name of the resource, unique within its type, for a given
-        api.
+    This entity only carries the plumbing a resource is deployed with, and is
+    deliberately not serializable: it must not end up in the body sent to the api.
     """
-    string name
+    bool send_event = true
+    bool serialize = false
 end
 
 ResourceABC.api [1] -- Api.resources [0:]
@@ -51,4 +54,78 @@ ResourceABC.api [1] -- Api.resources [0:]
 The api that the resource should be configured at.
 """
 
-index ResourceABC(api, name)
+
+entity JsonObjectABC extends ResourceABC, files::json::SerializableEntity:
+    """
+    Base entity for every object of the netbird api.
+
+    They are all json objects, and this module co-manages them with whoever else
+    edits the account: an attribute left null is kept as the api currently holds it,
+    only the values the model sets are enforced.  The resource is its own desired
+    state, so each object is one entity: the attributes declared here are the ones
+    the api reports about itself.
+    """
+    string path = "."
+end
+
+
+implementation json_object for JsonObjectABC:
+    """
+    The object serializes itself: it is both the resource inmanta deploys and the
+    json object the api holds.
+    """
+    self.resource = self
+end
+
+implement JsonObjectABC using parents, json_object
+
+
+typedef user_role_t as string matching self in [
+    "owner", "admin", "user", "network_admin", "billing_admin", "auditor",
+]
+
+
+entity User extends JsonObjectABC:
+    """
+    Manage a user of the netbird account.
+
+    :attr email: The email address of the user.  An invite is sent to it when the
+        user is created, and it is what identifies a regular user on the account.
+        The api drops it for a service user, which is identified by its name instead,
+        but it is still what identifies the resource within the model.
+    :attr name: The full name of the user.  The api only takes it when the user is
+        created, it is not enforced afterwards.  It is required for a service user,
+        as that is the only thing the api keeps to identify it.
+    :attr role: The role of the user on the account.
+    :attr auto_groups: The names of the groups the peers this user registers are
+        automatically added to.  The groups must already exist on the account, they
+        are resolved to their id at deploy time.
+    :attr is_blocked: Whether the user is blocked from using the account.
+    :attr is_service_user: Whether the user is a service user, i.e. a user that only
+        exists to hold access tokens and can not log in.  The api only takes it when
+        the user is created.
+    """
+    string email
+    string? name = null
+    user_role_t role = "user"
+    string[] auto_groups = []
+    bool is_blocked = false
+    bool is_service_user = false
+end
+
+index User(api, email)
+
+
+implementation service_user for User:
+    """
+    The api doesn't keep the email address of a service user, so the name is the only
+    thing left to find it back with.
+    """
+    std::assert(
+        self.name != null,
+        f"The netbird service user {self.email} requires a name, as the api doesn't keep its email address",
+    )
+end
+
+implement User using parents
+implement User using service_user when self.is_service_user

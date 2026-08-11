@@ -9,10 +9,18 @@ This package is an adapter that is meant to be used with the inmanta orchestrato
 
 This module allows to manage [netbird](https://netbird.io) resources, through the netbird management api.
 
-The module is a work in progress, it currently only contains the base entities every
+The module is a work in progress, it currently contains the base entities every
 resource of this module builds upon:
 1. `netbird::Api`: the endpoint and credentials used to reach the netbird management api.
 2. `netbird::ResourceABC`: the base entity for all the resources managed by this module.
+3. `netbird::JsonObjectABC`: the base entity for every object of the netbird api.
+
+And the following resources:
+1. `netbird::User`: a user, or a service user, of the netbird account.
+
+Every netbird object is co-managed with whoever else edits the account: an attribute
+left `null` in the model keeps the value the api currently holds, only the values the
+model sets are enforced.
 
 ## Example
 
@@ -21,8 +29,16 @@ import netbird
 
 api = netbird::Api(
     agent_name="netbird",
-    server_url="https://api.netbird.io",
-    token=std::get_env("NETBIRD_TOKEN"),
+    management_url="https://api.netbird.io",
+    api_token=std::get_env("NETBIRD_TOKEN"),
+)
+
+netbird::User(
+    api=api,
+    email="alice@example.com",
+    name="Alice",
+    role="admin",
+    auto_groups=["All"],
 )
 ```
 
@@ -36,3 +52,7 @@ source .venv/bin/activate
 make install
 pytest tests
 ```
+
+The tests deploy a netbird server locally, in a podman container of their own, and
+run against its api.  The container is started again for each test, so that every
+test sees a fresh, empty account.  They are skipped when podman is not available.
