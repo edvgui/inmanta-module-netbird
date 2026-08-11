@@ -41,7 +41,11 @@ class ResourceABC(
 
     # inmanta infers the type of the parent's fields from its own literal, which
     # makes any tuple of another length look like an invalid override
-    fields = ("management_url", "api_token", "desired_state")  # type: ignore[assignment]
+    fields: tuple[str, ...] = (  # type: ignore[assignment]
+        "management_url",
+        "api_token",
+        "desired_state",
+    )
     management_url: str
     api_token: str
 
@@ -124,69 +128,20 @@ def process_netbird_response(
         ) from e
 
 
-def groups(session: Session) -> list[dict]:
+def find_user(session: Session, name: str) -> dict | None:
     """
-    Get all the groups of the account.  The netbird api identifies groups by id
-    everywhere, but the model refers to them by name, as the name is the only stable
-    identifier across accounts.
-    """
-    return process_netbird_response(
-        session.get(url="groups"),
-        expected_type=list[dict],
-    )
+    Find a user of the account by its name, and return None if it doesn't exist.  The
+    listing is not filtered on the service_user query parameter, so it holds both the
+    regular and the service users of the account.
 
-
-def group_ids(session: Session, names: typing.Sequence[str]) -> list[str]:
-    """
-    Resolve a list of group names into the group ids the api expects.  A group that
-    doesn't exist is a configuration error: netbird creates groups from the setup
-    keys and the dashboard, this module never creates them.
-    """
-    ids_by_name = {group["name"]: group["id"] for group in groups(session)}
-    missing = [name for name in names if name not in ids_by_name]
-    if missing:
-        raise RuntimeError(
-            f"The following groups don't exist on the netbird account: {missing}"
-        )
-
-    return [ids_by_name[name] for name in names]
-
-
-def group_names(session: Session, ids: typing.Sequence[str]) -> list[str]:
-    """
-    Resolve a list of group ids into their names, so that the current state can be
-    compared to the desired state expressed in the model.
-    """
-    names_by_id = {group["id"]: group["name"] for group in groups(session)}
-    return [names_by_id.get(id, id) for id in ids]
-
-
-def find_user(
-    session: Session, *, email: str, name: str | None, is_service_user: bool
-) -> dict | None:
-    """
-    Find a user of the account, and return None if it doesn't exist.  The listing is
-    not filtered on the service_user query parameter, so it holds both the regular
-    and the service users of the account.
-
-    A regular user is found back by its email address.  The api doesn't keep the
-    email address of a service user, so that one is found back by its name, which the
-    model requires it to have.
+    The name is what identifies a user here: the api doesn't keep the email address
+    of a service user, so it is the only thing every user is guaranteed to have.
     """
     users = process_netbird_response(
         session.get(url="users"),
         expected_type=list[dict],
     )
-    if is_service_user:
-        return next(
-            (u for u in users if u["is_service_user"] and u["name"] == name),
-            None,
-        )
-
-    return next(
-        (u for u in users if not u["is_service_user"] and u["email"] == email),
-        None,
-    )
+    return next((u for u in users if u["name"] == name), None)
 
 
 NR = typing.TypeVar("NR", bound=ResourceABC)
@@ -237,43 +192,6 @@ class HandlerABC(inmanta.agent.handler.CRUDHandler[NR]):
         for name, value in ids.items():
             ctx.set_fact(name, value, expires=False)
 
-    def resolved_values(self, resource: NR) -> dict:
-        """
-        The values the api addresses by opaque id, and that the model therefore
-        expresses as a relation towards another object rather than as an attribute
-        it could serialize itself.  They are resolved against the api, so they take
-        part in the diff like any other value, and they are sent on every write.
-        """
-        return {}
-
-    def diff_keys(self, resource: NR) -> set[str]:
-        """
-        The keys that take part in the diff between the current and the desired
-        state.  By default those are all the ones the model has an opinion about,
-        plus the values the handler resolves against the api.
-
-        An object whose api rejects some of its values on an update narrows this
-        down: a difference the handler has no way to enforce would otherwise make
-        the resource change on every single deploy.
-        """
-        return managed_keys(resource.desired_state) | set(
-            self.resolved_values(resource)
-        )
-
-    def to_model(self, body: dict) -> dict:
-        """
-        Translate the object the api reports into the shape the model expresses, e.g.
-        a group that the api identifies by id and that the model names.
-        """
-        return body
-
-    def to_api(self, body: dict) -> dict:
-        """
-        Translate the object the model expresses into the shape the api expects, the
-        other way around from to_model.
-        """
-        return body
-
     def normalize(self, body: dict) -> dict:
         """
         Put a body in a canonical shape, so that the current and the desired state
@@ -281,30 +199,32 @@ class HandlerABC(inmanta.agent.handler.CRUDHandler[NR]):
         """
         return body
 
-    def read_body(self, resource: NR, current: dict) -> dict:
+    def merged_body(self, current: dict, resource: NR) -> dict:
         """
-        Narrow the object the api returned down to the values that take part in the
-        diff.  The api reports a lot more than that (what the agent detected, what
-        the api computed) and rejects most of it on a write, so it is kept out of
-        both the diff and the update body.
+        The object as it should be once the desired state is applied onto the state
+        the api currently holds.  Everything the model leaves null keeps the value
+        the account has for it, and the values the api computes on its own are
+        carried along rather than dropped, so that the body the handler writes back
+        stays complete even where the model has no opinion.
 
-        :param resource: The resource being read, carrying the desired state.
-        :param current: The object as the api returned it.
-        """
-        body = self.to_model(current)
+        On a create there is nothing to merge onto, and this is the desired state on
+        its own.
 
-        return self.normalize({key: body.get(key) for key in self.diff_keys(resource)})
+        :param current: The object as the api currently holds it.
+        :param resource: The resource being deployed, carrying the desired state.
+        """
+        return self.normalize(apply_desired_state(current, resource.desired_state))
 
-    def write_body(self, resource: NR) -> dict:
+    def diff_body(self, body: dict) -> dict:
         """
-        The body to send to the api.  Applying the desired state is idempotent, so
-        this works both on a create (nothing was read) and on an update (where
-        calculate_diff already applied it onto the current state).
+        The part of a body that takes part in the diff.  The api of an object that
+        only accepts some of its values on an update narrows this down: a difference
+        the handler has no way to enforce would otherwise show up as a change on
+        every single deploy, and never converge.
+
+        :param body: A full object, as the api holds it or as the model wants it.
         """
-        return self.to_api(
-            apply_desired_state(resource.body, resource.desired_state)
-            | self.resolved_values(resource)
-        )
+        return body
 
     def calculate_diff(
         self,
@@ -312,29 +232,15 @@ class HandlerABC(inmanta.agent.handler.CRUDHandler[NR]):
         current: NR,
         desired: NR,
     ) -> dict[str, dict[str, object]]:
-        keys = self.diff_keys(desired)
-        body = apply_desired_state(current.body, desired.desired_state) | (
-            self.resolved_values(desired)
-        )
-        desired.body = self.normalize({key: body[key] for key in keys if key in body})
+        desired.body = self.merged_body(current.body, desired)
 
         changes = super().calculate_diff(ctx, current, desired)
-        if desired.body != current.body:
-            changes["body"] = {"current": current.body, "desired": desired.body}
+        current_body = self.diff_body(current.body)
+        desired_body = self.diff_body(desired.body)
+        if desired_body != current_body:
+            changes["body"] = {"current": current_body, "desired": desired_body}
 
         return changes
-
-
-def managed_keys(desired_state: list[dict]) -> set[str]:
-    """
-    The top level keys the model has an opinion about, taken from the serialized
-    object.  The api reports much more than that (what the agent detected, what the
-    api computed), and it rejects those read-only values on an update, so both the
-    diff and the update body are narrowed down to these keys.
-
-    :param desired_state: The serialized object describing the desired state.
-    """
-    return {key for item in desired_state for key in item["value"] or {}}
 
 
 def apply_desired_state(current: dict, desired_state: list[dict]) -> dict:
@@ -358,97 +264,83 @@ def apply_desired_state(current: dict, desired_state: list[dict]) -> dict:
     return desired
 
 
+def select(body: dict, keys: typing.Sequence[str]) -> dict:
+    """
+    Narrow a body down to the keys one endpoint of the api takes.  The api doesn't
+    accept the same values on a create as on an update, and rejects the ones that
+    don't belong to the call being made.
+
+    :param body: The object the handler wants to write.
+    :param keys: The keys the endpoint takes.
+    """
+    return {key: body[key] for key in keys if key in body}
+
+
 # The keys of the user object the api takes when a user is created, and the ones it
 # takes when an existing user is updated.  They don't overlap fully: the identity of
-# the user is fixed at creation, and a user can only be blocked afterwards.
+# a user is fixed at creation, and a user can only be blocked afterwards.
 USER_CREATE_KEYS = ("email", "name", "role", "auto_groups", "is_service_user")
 USER_UPDATE_KEYS = ("role", "auto_groups", "is_blocked")
 
 
-@inmanta.resources.resource("netbird::User", "email", "api.agent_name")
+@inmanta.resources.resource("netbird::User", "name", "api.agent_name")
 class UserResource(ResourceABC):
-    fields = ("email", "name", "is_service_user")
-    email: str
-    name: str | None
-    is_service_user: bool
+    fields = ("name",)
+    name: str
 
 
 @inmanta.agent.handler.provider("netbird::User", "")
 class UserHandler(HandlerABC[UserResource]):
-    def diff_keys(self, resource: UserResource) -> set[str]:
+    def diff_body(self, body: dict) -> dict:
         # The api only takes USER_UPDATE_KEYS on an update, so the values it only
-        # accepts at creation are kept out of the diff: the handler could not
-        # enforce a change to them anyway.
-        return super().diff_keys(resource) & set(USER_UPDATE_KEYS)
-
-    def to_model(self, body: dict) -> dict:
-        # The api identifies the groups a user's peers are added to by id, the model
-        # refers to them by name
-        if "auto_groups" in body:
-            body["auto_groups"] = group_names(self.session, body["auto_groups"] or [])
-
-        return body
-
-    def to_api(self, body: dict) -> dict:
-        if "auto_groups" in body:
-            body["auto_groups"] = group_ids(self.session, body["auto_groups"])
-
-        return body
+        # accepts at creation are kept out of the diff: the handler could not enforce
+        # a change to them anyway.
+        return select(body, USER_UPDATE_KEYS)
 
     def normalize(self, body: dict) -> dict:
         # The api doesn't preserve the order of the auto groups
-        if "auto_groups" in body:
+        if body.get("auto_groups") is not None:
             body["auto_groups"] = sorted(body["auto_groups"])
 
         return body
-
-    def create_body(self, resource: UserResource) -> dict:
-        return {
-            k: v for k, v in self.write_body(resource).items() if k in USER_CREATE_KEYS
-        }
-
-    def update_body(self, resource: UserResource) -> dict:
-        return {
-            k: v for k, v in self.write_body(resource).items() if k in USER_UPDATE_KEYS
-        }
 
     def read_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: UserResource,
     ) -> None:
-        user = find_user(
-            self.session,
-            email=resource.email,
-            name=resource.name,
-            is_service_user=resource.is_service_user,
-        )
+        user = find_user(self.session, resource.name)
         if user is None:
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", user["id"])
-        self.publish_ids(ctx, user_id=user["id"])
+        self.publish_ids(ctx, id=user["id"])
 
-        resource.body = self.read_body(resource, user)
+        resource.body = self.normalize(user)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: UserResource,
     ) -> None:
+        desired = self.merged_body({}, resource)
         user = process_netbird_response(
-            self.session.post(url="users", json=self.create_body(resource)),
+            self.session.post(url="users", json=select(desired, USER_CREATE_KEYS)),
             expected_type=dict,
         )
-        self.publish_ids(ctx, user_id=user["id"])
+        self.publish_ids(ctx, id=user["id"])
         ctx.set_created()
 
-        update_body = self.update_body(resource)
-        if update_body.get("is_blocked"):
-            # The api doesn't take the blocked flag when the user is created, so a
-            # user the model wants blocked from the start needs a second call.
+        if desired.get("is_blocked"):
+            # The api doesn't take the blocked flag when a user is created, so a user
+            # the model wants blocked from the start needs a second call.  It is
+            # built from the user the api just made, as an update has to carry the
+            # values the model has no opinion about too.
             process_netbird_response(
-                self.session.put(url=f"users/{user['id']}", json=update_body),
+                self.session.put(
+                    url=f"users/{user['id']}",
+                    json=select(self.merged_body(user, resource), USER_UPDATE_KEYS),
+                ),
             )
 
     def update_resource(
@@ -457,10 +349,13 @@ class UserHandler(HandlerABC[UserResource]):
         changes: dict,
         resource: UserResource,
     ) -> None:
+        # The body calculate_diff merged is the object as the api holds it, with the
+        # desired state applied on top.  The api only takes part of it on an update,
+        # and rejects everything else.
         process_netbird_response(
             self.session.put(
                 url=f"users/{ctx.get('ID')}",
-                json=self.update_body(resource),
+                json=select(resource.body, USER_UPDATE_KEYS),
             ),
         )
         ctx.set_updated()

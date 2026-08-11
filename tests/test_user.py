@@ -18,14 +18,15 @@ Contact: edvgui@gmail.com
 
 import collections.abc
 
-import pytest
+import inmanta_plugins.std
 import pytest_inmanta.plugin
 import requests
 from conftest import DEFAULT_GROUP
 
-import inmanta.ast
+import inmanta.plugins
 from inmanta import const
 
+USER_NAME = "Alice"
 USER_EMAIL = "alice@example.com"
 
 Compile = collections.abc.Callable[[str], None]
@@ -33,38 +34,41 @@ Get = collections.abc.Callable[[str], list[dict] | dict]
 Facts = collections.abc.Callable[[], dict[str, str]]
 
 
-def find_user(get: Get, email: str) -> dict | None:
-    return next((u for u in get("users") if u["email"] == email), None)
+def find_user(get: Get, name: str) -> dict | None:
+    return next((u for u in get("users") if u["name"] == name), None)
 
 
-def find_service_user(get: Get, name: str) -> dict | None:
-    return next(
-        (u for u in get("users") if u["is_service_user"] and u["name"] == name), None
+def group_id(get: Get, name: str) -> str:
+    return next(g["id"] for g in get("groups") if g["name"] == name)
+
+
+def user_model(**attributes: object) -> str:
+    """
+    Build a user resource, with only the attributes the test has an opinion about:
+    everything else is left null, and is therefore not managed.
+    """
+    return "\n".join(
+        [
+            "user = netbird::User(",
+            "    api=api,",
+            f"    name={USER_NAME!r},",
+            *(f"    {key}={value}," for key, value in attributes.items()),
+            ")",
+        ]
     )
 
 
-def user_model(
-    *,
-    name: str | None = "Alice",
-    role: str = "user",
-    auto_groups: list[str] | None = None,
-    is_blocked: bool = False,
-    is_service_user: bool = False,
-    purged: bool = False,
-) -> str:
-    named = "" if name is None else f"name={name!r},"
-    return f"""
-        user = netbird::User(
-            api=api,
-            email={USER_EMAIL!r},
-            {named}
-            role={role!r},
-            auto_groups={auto_groups if auto_groups is not None else []},
-            is_blocked={str(is_blocked).lower()},
-            is_service_user={str(is_service_user).lower()},
-            purged={str(purged).lower()},
-        )
+def dsl(value: object) -> str:
     """
+    Render a python value as the inmanta literal it maps onto.
+    """
+    match value:
+        case bool():
+            return str(value).lower()
+        case list():
+            return "[" + ", ".join(dsl(item) for item in value) + "]"
+        case _:
+            return repr(value)
 
 
 def test_user_created_updated_and_purged(
@@ -78,142 +82,163 @@ def test_user_created_updated_and_purged(
     are kept in line with the model, and the user is removed when the resource is
     purged.
     """
-    compile_model(user_model())
+    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
     project.deploy_resource("netbird::User")
 
-    user = find_user(get, USER_EMAIL)
+    user = find_user(get, USER_NAME)
     assert user is not None
     # The id the api gave the user is published, already on the deploy that
     # created it.
-    assert facts() == {"user_id": user["id"]}
-    assert user["name"] == "Alice"
+    assert facts() == {"id": user["id"]}
+    assert user["email"] == USER_EMAIL
     assert user["role"] == "user"
-    assert user["auto_groups"] == []
     assert user["is_blocked"] is False
     assert user["is_service_user"] is False
 
     # A second deploy of the same desired state changes nothing.
-    compile_model(user_model())
+    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
 
-    compile_model(user_model(role="admin"))
+    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("admin")))
     project.deploy_resource("netbird::User")
-    assert find_user(get, USER_EMAIL)["role"] == "admin"
+    assert find_user(get, USER_NAME)["role"] == "admin"
 
-    compile_model(user_model(role="admin", is_blocked=True))
+    compile_model(user_model(email=dsl(USER_EMAIL), is_blocked=dsl(True)))
     project.deploy_resource("netbird::User")
-    assert find_user(get, USER_EMAIL)["is_blocked"] is True
+    blocked = find_user(get, USER_NAME)
+    assert blocked["is_blocked"] is True
+    # The role isn't managed anymore, and the api requires one on every update: the
+    # one the account holds is carried along instead of being reset.
+    assert blocked["role"] == "admin"
 
-    compile_model(user_model(purged=True))
+    compile_model(user_model(purged=dsl(True)))
     project.deploy_resource("netbird::User")
-    assert find_user(get, USER_EMAIL) is None
+    assert find_user(get, USER_NAME) is None
 
 
-def test_user_auto_groups_are_named(
+def test_user_auto_groups(
     project: pytest_inmanta.plugin.Project,
     compile_model: Compile,
     get: Get,
 ) -> None:
     """
-    The api identifies the groups a user's peers are added to by id, the model refers
-    to them by name.  The names are resolved both ways, so the same desired state is
-    a no-op on the second deploy.
+    The api identifies the groups a user's peers are added to by id, and so does the
+    model: no name is translated on the way in or out, so the same desired state is a
+    no-op on the second deploy.
     """
-    compile_model(user_model(auto_groups=[DEFAULT_GROUP]))
-    project.deploy_resource("netbird::User")
+    all_group = group_id(get, DEFAULT_GROUP)
 
-    user = find_user(get, USER_EMAIL)
-    group_names = {g["id"]: g["name"] for g in get("groups")}
-    assert [group_names[i] for i in user["auto_groups"]] == [DEFAULT_GROUP]
-
-    compile_model(user_model(auto_groups=[DEFAULT_GROUP]))
-    project.deploy_resource("netbird::User", change=const.Change.nochange)
-
-    compile_model(user_model(auto_groups=[]))
-    project.deploy_resource("netbird::User")
-    assert find_user(get, USER_EMAIL)["auto_groups"] == []
-
-
-def test_user_with_unknown_group_fails(
-    project: pytest_inmanta.plugin.Project,
-    compile_model: Compile,
-    get: Get,
-) -> None:
-    """
-    This module never creates a group, it only refers to the ones the account already
-    has.  A group that doesn't exist is a configuration error, and the deploy says
-    which one is missing rather than silently inviting a user into nothing.
-    """
-    compile_model(user_model(auto_groups=["Nope"]))
-    project.deploy_resource("netbird::User", status=const.ResourceState.failed)
-
-    assert any(
-        "Nope" in log._data["msg"] or "Nope" in str(log._data.get("traceback", ""))
-        for log in project.ctx.logs
+    compile_model(
+        user_model(
+            email=dsl(USER_EMAIL), role=dsl("user"), auto_groups=dsl([all_group])
+        )
     )
-    assert find_user(get, USER_EMAIL) is None
+    project.deploy_resource("netbird::User")
+    assert find_user(get, USER_NAME)["auto_groups"] == [all_group]
+
+    compile_model(
+        user_model(
+            email=dsl(USER_EMAIL), role=dsl("user"), auto_groups=dsl([all_group])
+        )
+    )
+    project.deploy_resource("netbird::User", change=const.Change.nochange)
+
+    compile_model(user_model(email=dsl(USER_EMAIL), auto_groups=dsl([])))
+    project.deploy_resource("netbird::User")
+    assert find_user(get, USER_NAME)["auto_groups"] == []
 
 
-def test_service_user_is_created(
+def test_service_user_created_and_purged(
     project: pytest_inmanta.plugin.Project,
     compile_model: Compile,
     get: Get,
 ) -> None:
     """
-    A service user only exists to hold access tokens, it can not log in.  It is
-    created by the same resource, and shows up in the same listing.  The api drops
-    its email address, so it is found back by its name instead: a redeploy must not
-    create a second one.
+    A service user only exists to hold access tokens, it can not log in, and the api
+    keeps no email address for it.  The name is what identifies every user here, so
+    the same resource manages it, and a redeploy doesn't create a second one.
     """
-    compile_model(user_model(name="Alice", is_service_user=True, role="admin"))
+    compile_model(user_model(role=dsl("admin"), is_service_user=dsl(True)))
     project.deploy_resource("netbird::User")
 
-    user = find_service_user(get, "Alice")
+    user = find_user(get, USER_NAME)
     assert user is not None
+    assert user["is_service_user"] is True
     assert user["email"] == ""
     assert user["role"] == "admin"
 
-    compile_model(user_model(name="Alice", is_service_user=True, role="admin"))
+    compile_model(user_model(role=dsl("admin"), is_service_user=dsl(True)))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
-    assert [u["name"] for u in get("users") if u["is_service_user"]] == ["Alice"]
+    assert [u["name"] for u in get("users") if u["is_service_user"]] == [USER_NAME]
 
-    compile_model(
-        user_model(name="Alice", is_service_user=True, role="admin", purged=True)
-    )
+    compile_model(user_model(purged=dsl(True)))
     project.deploy_resource("netbird::User")
-    assert find_service_user(get, "Alice") is None
+    assert find_user(get, USER_NAME) is None
 
 
-def test_service_user_requires_a_name(
-    compile_model: Compile,
-) -> None:
-    """
-    The api keeps nothing but the name of a service user, so a model that doesn't
-    give one describes a user that could never be found back.  That is a compile
-    error, not something to discover on the first redeploy.
-    """
-    with pytest.raises(inmanta.ast.ExternalException, match="requires a name"):
-        compile_model(user_model(name=None, is_service_user=True))
-
-
-def test_settings_left_out_of_the_api_update_are_not_enforced(
+def test_attributes_left_null_are_not_managed(
     project: pytest_inmanta.plugin.Project,
     compile_model: Compile,
     get: Get,
     netbird: requests.Session,
 ) -> None:
     """
-    The api only takes the role, the auto groups and the blocked flag when a user is
-    updated.  The name of a user is therefore only set when it is created, and a
-    later change to it is not something the handler could enforce: it must not show
-    up as a change on every deploy.
+    Every attribute the model leaves null keeps whatever value the account holds for
+    it, even when it was changed in the dashboard behind our back.  And a value the
+    model does set is enforced, dashboard or not.
     """
-    compile_model(user_model(name="Alice"))
+    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
     project.deploy_resource("netbird::User")
 
-    user = find_user(get, USER_EMAIL)
-    assert user["name"] == "Alice"
+    user = find_user(get, USER_NAME)
+    netbird.put(
+        f"{netbird.base_url}/users/{user['id']}",
+        json={"role": "user", "auto_groups": [], "is_blocked": True},
+    ).raise_for_status()
 
-    compile_model(user_model(name="Alice Cooper"))
+    # The blocked flag isn't managed: the deploy leaves it as it is.
+    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
     project.deploy_resource("netbird::User", change=const.Change.nochange)
-    assert find_user(get, USER_EMAIL)["name"] == "Alice"
+    assert find_user(get, USER_NAME)["is_blocked"] is True
+
+    compile_model(user_model(email=dsl(USER_EMAIL), is_blocked=dsl(False)))
+    project.deploy_resource("netbird::User")
+    assert find_user(get, USER_NAME)["is_blocked"] is False
+
+
+def test_create_only_attributes_are_not_enforced(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    get: Get,
+) -> None:
+    """
+    The api only takes the role, the auto groups and the blocked flag when a user is
+    updated.  The email address of a user is therefore only set when it is created,
+    and a later change to it is not something the handler could enforce: it must not
+    show up as a change on every deploy.
+    """
+    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+    project.deploy_resource("netbird::User")
+    assert find_user(get, USER_NAME)["email"] == USER_EMAIL
+
+    compile_model(user_model(email=dsl("alice.cooper@example.com"), role=dsl("user")))
+    project.deploy_resource("netbird::User", change=const.Change.nochange)
+    assert find_user(get, USER_NAME)["email"] == USER_EMAIL
+
+
+def test_resource_id_is_a_fact_reference(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+) -> None:
+    """
+    The api addresses every object by an opaque id the model never knows.  It is
+    exposed on the resource all the same, as a reference that reads it back from the
+    facts the handler publishes, so another resource can point at this user without
+    going digging through the api.
+    """
+    compile_model(user_model(email=dsl(USER_EMAIL), role=dsl("user")))
+
+    (user,) = project.get_instances("netbird::User")
+    resource_id = inmanta.plugins.allow_reference_values(user).resource_id
+    assert isinstance(resource_id, inmanta_plugins.std.FactReference)
+    assert resource_id.fact_name == "id"

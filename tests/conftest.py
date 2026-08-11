@@ -41,6 +41,11 @@ SETUP_OWNER_PASSWORD = "a-long-enough-test-password-1234"
 # that is there from the start.
 DEFAULT_GROUP = "All"
 
+# How many times to try starting the server before giving up.  A start only fails
+# when one of the ports it picked was taken in between, so a new set of ports is
+# usually all it takes.
+SERVER_START_ATTEMPTS = 3
+
 
 def free_port() -> int:
     """
@@ -118,6 +123,72 @@ def wait_until(
     raise TimeoutError(f"{what} within {timeout}s:\n{logs.stdout}\n{logs.stderr}")
 
 
+def start_server(path: pathlib.Path) -> tuple[str, int]:
+    """
+    Start a netbird server and wait until its api answers, and return the id of the
+    container running it together with the port the api listens on.
+
+    The ports the server binds are picked by asking the kernel for a free one and
+    letting it go again, so another process on the machine can take one in between.
+    That shows up as a container that exits on startup, which is worth another go on
+    a new set of ports rather than a failed test.
+
+    :param path: The directory to write the configuration and the data of the server
+        in.  Each attempt gets a subdirectory of its own.
+    """
+    for attempt in range(SERVER_START_ATTEMPTS):
+        root = path / f"attempt{attempt}"
+        (root / "data").mkdir(parents=True)
+        api_port = free_port()
+        config = server_config(api_port=api_port, path=root)
+
+        container_id = subprocess.run(
+            [
+                "podman",
+                "run",
+                "-d",
+                # No --rm: a server that dies on startup would take its logs with it,
+                # and those logs are all wait_until has to report.
+                "--network",
+                "host",
+                # Lets the setup api create the first owner and hand us back a token,
+                # instead of requiring a browser login against the embedded idp.
+                "-e",
+                "NB_SETUP_PAT_ENABLED=true",
+                "-v",
+                f"{config}:/etc/netbird/config.yaml:ro,Z",
+                "-v",
+                f"{root / 'data'}:/var/lib/netbird:Z",
+                NETBIRD_SERVER_IMAGE,
+                "--config",
+                "/etc/netbird/config.yaml",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        try:
+            # The api answers 401 without a token, which is enough to know it is up.
+            wait_until(
+                lambda: requests.get(
+                    f"http://127.0.0.1:{api_port}/api/peers", timeout=2
+                ).status_code
+                == 401,
+                container_id,
+                "the netbird server did not become ready",
+            )
+        except TimeoutError:
+            subprocess.run(["podman", "rm", "-f", container_id], capture_output=True)
+            if attempt + 1 == SERVER_START_ATTEMPTS:
+                raise
+            continue
+
+        return container_id, api_port
+
+    raise AssertionError("unreachable")
+
+
 @pytest.fixture()
 def netbird(tmp_path: pathlib.Path) -> collections.abc.Iterator[requests.Session]:
     """
@@ -139,45 +210,10 @@ def netbird(tmp_path: pathlib.Path) -> collections.abc.Iterator[requests.Session
     if shutil.which("podman") is None:
         pytest.skip("podman is required to run the netbird server")
 
-    api_port = free_port()
-    config = server_config(api_port=api_port, path=tmp_path)
-    data = tmp_path / "data"
-    data.mkdir()
-
-    container_id = subprocess.run(
-        [
-            "podman",
-            "run",
-            "-d",
-            "--rm",
-            "--network",
-            "host",
-            # Lets the setup api below create the first owner and hand us back a
-            # token, instead of requiring a browser login against the embedded idp.
-            "-e",
-            "NB_SETUP_PAT_ENABLED=true",
-            "-v",
-            f"{config}:/etc/netbird/config.yaml:ro,Z",
-            "-v",
-            f"{data}:/var/lib/netbird:Z",
-            NETBIRD_SERVER_IMAGE,
-            "--config",
-            "/etc/netbird/config.yaml",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    container_id, api_port = start_server(tmp_path)
 
     url = f"http://127.0.0.1:{api_port}"
     try:
-        # The api answers 401 without a token, which is enough to know it is up.
-        wait_until(
-            lambda: requests.get(f"{url}/api/peers", timeout=2).status_code == 401,
-            container_id,
-            "the netbird server did not become ready",
-        )
-
         setup = requests.post(
             f"{url}/api/setup",
             json={

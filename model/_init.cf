@@ -44,15 +44,33 @@ entity ResourceABC extends std::PurgeableResource, std::ManagedResource, files::
 
     This entity only carries the plumbing a resource is deployed with, and is
     deliberately not serializable: it must not end up in the body sent to the api.
+
+    :attr resource_id: The opaque id the api gave this object.  The model never knows
+        it, so it is a reference that is resolved from the facts the handler
+        publishes, at the moment the value is needed on the agent.  Point another
+        resource at this object with it, rather than going digging through the api.
     """
     bool send_event = true
     bool serialize = false
+    string resource_id
 end
 
 ResourceABC.api [1] -- Api.resources [0:]
 """
 The api that the resource should be configured at.
 """
+
+
+implementation resource_id for ResourceABC:
+    """
+    The api addresses every object by an opaque id, which it only hands out once the
+    object exists.  The handler publishes it as a fact, and this reference reads it
+    back from there on the agent.
+    """
+    self.resource_id = std::create_fact_reference(self, "id")
+end
+
+implement ResourceABC using resource_id
 
 
 entity JsonObjectABC extends ResourceABC, files::json::SerializableEntity:
@@ -87,45 +105,34 @@ typedef user_role_t as string matching self in [
 
 entity User extends JsonObjectABC:
     """
-    Manage a user of the netbird account.
+    Manage a user, or a service user, of the netbird account.
 
+    Every attribute but the name is optional, and left null it is not managed: the
+    user keeps whatever value the account holds for it.  The api does require some
+    of them to create a user that doesn't exist yet (the role always, and the email
+    address of anyone who is not a service user), and it rejects a change to the ones
+    it only takes at creation.
+
+    :attr name: The full name of the user, which is what identifies it.  The api only
+        takes it when the user is created, it is not enforced afterwards.
     :attr email: The email address of the user.  An invite is sent to it when the
-        user is created, and it is what identifies a regular user on the account.
-        The api drops it for a service user, which is identified by its name instead,
-        but it is still what identifies the resource within the model.
-    :attr name: The full name of the user.  The api only takes it when the user is
-        created, it is not enforced afterwards.  It is required for a service user,
-        as that is the only thing the api keeps to identify it.
+        user is created.  The api doesn't keep it for a service user.
     :attr role: The role of the user on the account.
-    :attr auto_groups: The names of the groups the peers this user registers are
-        automatically added to.  The groups must already exist on the account, they
-        are resolved to their id at deploy time.
+    :attr auto_groups: The ids of the groups the peers this user registers are
+        automatically added to.
     :attr is_blocked: Whether the user is blocked from using the account.
     :attr is_service_user: Whether the user is a service user, i.e. a user that only
         exists to hold access tokens and can not log in.  The api only takes it when
         the user is created.
     """
-    string email
-    string? name = null
-    user_role_t role = "user"
-    string[] auto_groups = []
-    bool is_blocked = false
-    bool is_service_user = false
+    string name
+    string? email = null
+    user_role_t? role = null
+    string[]? auto_groups = null
+    bool? is_blocked = null
+    bool? is_service_user = null
 end
 
-index User(api, email)
-
-
-implementation service_user for User:
-    """
-    The api doesn't keep the email address of a service user, so the name is the only
-    thing left to find it back with.
-    """
-    std::assert(
-        self.name != null,
-        f"The netbird service user {self.email} requires a name, as the api doesn't keep its email address",
-    )
-end
+index User(api, name)
 
 implement User using parents
-implement User using service_user when self.is_service_user
