@@ -19,10 +19,12 @@ Contact: edvgui@gmail.com
 import collections.abc
 import json
 
+import inmanta_plugins.std
 import pytest_inmanta.plugin
 import requests
 from conftest import DEFAULT_GROUP, facts, get
 
+import inmanta.plugins
 from inmanta import const
 
 ZONE_DOMAIN = "zone.example.com"
@@ -61,17 +63,20 @@ def zone_model(**attributes: object) -> str:
     )
 
 
-def record_model(**attributes: object) -> str:
+def record_model(zone: str, **attributes: object) -> str:
     """
-    Build a dns record resource under the zone the model declares as ``zone``.  The
-    zone is pointed at by its id, which is a reference the agent resolves from the
-    facts the zone's handler publishes.
+    Build a dns record resource under a zone.  The api addresses the zone by its
+    opaque id, and so does the model: a real deployment takes it from the ``id`` of
+    the ``netbird::DnsZone`` resource, which is a reference the agent resolves, and
+    the tests read it off the api the same way they resolve a group id.
+
+    :param zone: The id of the zone holding the record.
     """
     return "\n".join(
         [
             "record = netbird::DnsZoneRecord(",
             "    api=api,",
-            "    _zone=zone.id,",
+            f"    _zone={json.dumps(zone)},",
             f"    name={json.dumps(RECORD_NAME)},",
             *(f"    {key}={json.dumps(value)}," for key, value in attributes.items()),
             ")",
@@ -207,40 +212,72 @@ def test_record_created_updated_and_purged(
     netbird: requests.Session,
 ) -> None:
     """
-    A record is created under its zone, which it points at by the id the zone's
-    handler publishes, and the values the model manages are kept in line with it.
+    A record is created under its zone, and the values the model manages are kept in
+    line with it.  The record is addressed by its name together with its type, and
+    the api replaces the whole record on an update, so a ttl the model doesn't manage
+    has to survive a change to the content.
     """
     all_group = group_id(netbird, DEFAULT_GROUP)
-    model = zone_model(name=ZONE_NAME, distribution_groups=[all_group])
 
-    compile_model(model + "\n" + record_model(type="A", content="10.0.0.1", ttl=300))
+    compile_model(zone_model(name=ZONE_NAME, distribution_groups=[all_group]))
     project.deploy_resource("netbird::DnsZone")
+    zone = find_zone(netbird, ZONE_DOMAIN)["id"]
+
+    compile_model(record_model(zone, type="A", content="10.0.0.1", ttl=300))
     project.deploy_resource("netbird::DnsZoneRecord")
 
-    zone = find_zone(netbird, ZONE_DOMAIN)
-    record = find_record(netbird, zone["id"], RECORD_NAME)
+    record = find_record(netbird, zone, RECORD_NAME)
     assert record is not None
     assert record["type"] == "A"
     assert record["content"] == "10.0.0.1"
     assert record["ttl"] == 300
+    # The id the api gave the record is published, already on the deploy that
+    # created it.
+    assert facts(project) == {"id": record["id"]}
 
     # A second deploy of the same desired state changes nothing.
-    compile_model(model + "\n" + record_model(type="A", content="10.0.0.1", ttl=300))
-    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+    compile_model(record_model(zone, type="A", content="10.0.0.1", ttl=300))
     project.deploy_resource("netbird::DnsZoneRecord", change=const.Change.nochange)
 
-    compile_model(model + "\n" + record_model(type="A", content="10.0.0.2"))
-    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+    compile_model(record_model(zone, type="A", content="10.0.0.2"))
     project.deploy_resource("netbird::DnsZoneRecord")
-    record = find_record(netbird, zone["id"], RECORD_NAME)
+    record = find_record(netbird, zone, RECORD_NAME)
     assert record["content"] == "10.0.0.2"
     # The api resets a ttl left out of the update to zero.  The model doesn't manage
-    # it anymore, and the handler carries the account's own value along.
+    # it, and the handler carries the account's own value along instead.
     assert record["ttl"] == 300
 
-    compile_model(
-        model + "\n" + record_model(type="A", content="10.0.0.2", purged=True)
-    )
-    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+    compile_model(record_model(zone, type="A", content="10.0.0.2", purged=True))
     project.deploy_resource("netbird::DnsZoneRecord")
-    assert find_record(netbird, zone["id"], RECORD_NAME) is None
+    assert find_record(netbird, zone, RECORD_NAME) is None
+
+
+def test_record_zone_is_a_fact_reference(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+) -> None:
+    """
+    A record points at its zone by the opaque id the api gave it, which the model
+    never knows: taking it from the zone resource yields a reference the agent
+    resolves from the facts the zone's handler publishes.
+    """
+    compile_model(
+        zone_model(name=ZONE_NAME)
+        + "\n"
+        + "\n".join(
+            [
+                "record = netbird::DnsZoneRecord(",
+                "    api=api,",
+                "    _zone=zone.id,",
+                f"    name={json.dumps(RECORD_NAME)},",
+                '    type="A",',
+                '    content="10.0.0.1",',
+                ")",
+            ]
+        )
+    )
+
+    (record,) = project.get_instances("netbird::DnsZoneRecord")
+    zone = inmanta.plugins.allow_reference_values(record)._zone
+    assert isinstance(zone, inmanta_plugins.std.FactReference)
+    assert zone.fact_name == "id"
