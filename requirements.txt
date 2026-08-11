@@ -1,2 +1,2 @@
-inmanta-module-std==8.7.3
+inmanta-module-std==8.7.4
 inmanta-core==18.1.3
