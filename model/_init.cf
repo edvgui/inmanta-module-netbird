@@ -45,14 +45,14 @@ entity ResourceABC extends std::PurgeableResource, std::ManagedResource, files::
     This entity only carries the plumbing a resource is deployed with, and is
     deliberately not serializable: it must not end up in the body sent to the api.
 
-    :attr resource_id: The opaque id the api gave this object.  The model never knows
-        it, so it is a reference that is resolved from the facts the handler
-        publishes, at the moment the value is needed on the agent.  Point another
-        resource at this object with it, rather than going digging through the api.
+    :attr id: The opaque id the api gave this object.  The model never knows it, so
+        it is a reference that is resolved from the facts the handler publishes, at
+        the moment the value is needed on the agent.  Point another resource at this
+        object with it, rather than going digging through the api.
     """
     bool send_event = true
     bool serialize = false
-    string resource_id
+    string id
 end
 
 ResourceABC.api [1] -- Api.resources [0:]
@@ -61,16 +61,16 @@ The api that the resource should be configured at.
 """
 
 
-implementation resource_id for ResourceABC:
+implementation object_id for ResourceABC:
     """
     The api addresses every object by an opaque id, which it only hands out once the
     object exists.  The handler publishes it as a fact, and this reference reads it
     back from there on the agent.
     """
-    self.resource_id = std::create_fact_reference(self, "id")
+    self.id = std::create_fact_reference(self, "id")
 end
 
-implement ResourceABC using resource_id
+implement ResourceABC using object_id
 
 
 entity JsonObjectABC extends ResourceABC, files::json::SerializableEntity:
@@ -106,6 +106,8 @@ typedef user_role_t as string matching self in [
 entity User extends JsonObjectABC:
     """
     Manage a user, or a service user, of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/users
 
     Every attribute but the name is optional, and left null it is not managed: the
     user keeps whatever value the account holds for it.  The api does require some

@@ -261,31 +261,17 @@ def compile_model(
     return compile
 
 
-@pytest.fixture()
-def get(
-    netbird: requests.Session,
-) -> collections.abc.Callable[[str], list[dict] | dict]:
+def get(netbird: requests.Session, path: str) -> list[dict] | dict:
     """
-    Return a helper doing a GET on the netbird api and returning the parsed body.
+    Do a GET on the netbird api and return the parsed body.
     """
-
-    def _get(path: str) -> list[dict] | dict:
-        response = netbird.get(f"{netbird.base_url}/{path}")
-        response.raise_for_status()
-        return response.json()
-
-    return _get
+    response = netbird.get(f"{netbird.base_url}/{path}")
+    response.raise_for_status()
+    return response.json()
 
 
-@pytest.fixture()
-def facts(
-    project: pytest_inmanta.plugin.Project,
-) -> collections.abc.Callable[[], dict[str, str]]:
+def facts(project: pytest_inmanta.plugin.Project) -> dict[str, str]:
     """
-    Return a helper listing the facts the last deploy published, by name.
+    The facts the last deploy published, by name.
     """
-
-    def _facts() -> dict[str, str]:
-        return {fact["id"]: fact["value"] for fact in project.ctx.facts}
-
-    return _facts
+    return {fact["id"]: fact["value"] for fact in project.ctx.facts}

@@ -21,9 +21,9 @@ And the following resources:
 Every netbird object is co-managed with whoever else edits the account: an attribute
 left `null` in the model keeps the value the api currently holds, only the values the
 model sets are enforced.  The api addresses its objects by opaque ids, and so does
-this module: `netbird::ResourceABC.resource_id` is a reference resolving the id of an
-object from the facts its resource publishes, to be fed to whatever other resource
-points at it.
+this module: `netbird::ResourceABC.id` is a reference resolving the id of an object
+from the facts its resource publishes, to be fed to whatever other resource points at
+it.
 
 ## Example
 
