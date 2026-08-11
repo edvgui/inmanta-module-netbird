@@ -1,0 +1,246 @@
+"""
+Copyright 2026 Guillaume Everarts de Velp
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Contact: edvgui@gmail.com
+"""
+
+import collections.abc
+import json
+
+import pytest_inmanta.plugin
+import requests
+from conftest import DEFAULT_GROUP, facts, get
+
+from inmanta import const
+
+ZONE_DOMAIN = "zone.example.com"
+ZONE_NAME = "Example zone"
+RECORD_NAME = f"www.{ZONE_DOMAIN}"
+
+Compile = collections.abc.Callable[[str], None]
+
+
+def find_zone(netbird: requests.Session, domain: str) -> dict | None:
+    return next((z for z in get(netbird, "dns/zones") if z["domain"] == domain), None)
+
+
+def find_record(netbird: requests.Session, zone: str, name: str) -> dict | None:
+    records = get(netbird, f"dns/zones/{zone}/records")
+    return next((r for r in records if r["name"] == name), None)
+
+
+def group_id(netbird: requests.Session, name: str) -> str:
+    return next(g["id"] for g in get(netbird, "groups") if g["name"] == name)
+
+
+def zone_model(**attributes: object) -> str:
+    """
+    Build a dns zone resource, with only the attributes the test has an opinion
+    about: everything else is left null, and is therefore not managed.
+    """
+    return "\n".join(
+        [
+            "zone = netbird::DnsZone(",
+            "    api=api,",
+            f"    domain={json.dumps(ZONE_DOMAIN)},",
+            *(f"    {key}={json.dumps(value)}," for key, value in attributes.items()),
+            ")",
+        ]
+    )
+
+
+def record_model(**attributes: object) -> str:
+    """
+    Build a dns record resource under the zone the model declares as ``zone``.  The
+    zone is pointed at by its id, which is a reference the agent resolves from the
+    facts the zone's handler publishes.
+    """
+    return "\n".join(
+        [
+            "record = netbird::DnsZoneRecord(",
+            "    api=api,",
+            "    _zone=zone.id,",
+            f"    name={json.dumps(RECORD_NAME)},",
+            *(f"    {key}={json.dumps(value)}," for key, value in attributes.items()),
+            ")",
+        ]
+    )
+
+
+def test_zone_created_updated_and_purged(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    A zone is created on the account, the settings the model has an opinion about are
+    kept in line with it, and the zone is removed when the resource is purged.
+    """
+    all_group = group_id(netbird, DEFAULT_GROUP)
+
+    compile_model(zone_model(name=ZONE_NAME, distribution_groups=[all_group]))
+    project.deploy_resource("netbird::DnsZone")
+
+    zone = find_zone(netbird, ZONE_DOMAIN)
+    assert zone is not None
+    # The id the api gave the zone is published, already on the deploy that created
+    # it.
+    assert facts(project) == {"id": zone["id"]}
+    assert zone["name"] == ZONE_NAME
+    assert zone["distribution_groups"] == [all_group]
+    assert zone["enabled"] is True
+    assert zone["enable_search_domain"] is False
+
+    # A second deploy of the same desired state changes nothing.
+    compile_model(zone_model(name=ZONE_NAME, distribution_groups=[all_group]))
+    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+
+    compile_model(
+        zone_model(
+            name="Renamed zone",
+            distribution_groups=[all_group],
+            enabled=False,
+            enable_search_domain=True,
+        )
+    )
+    project.deploy_resource("netbird::DnsZone")
+    zone = find_zone(netbird, ZONE_DOMAIN)
+    assert zone["name"] == "Renamed zone"
+    assert zone["enabled"] is False
+    assert zone["enable_search_domain"] is True
+
+    compile_model(zone_model(purged=True))
+    project.deploy_resource("netbird::DnsZone")
+    assert find_zone(netbird, ZONE_DOMAIN) is None
+
+
+def test_zone_attributes_left_null_are_not_managed(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    The api replaces the whole zone on an update: every key left out of the body is
+    reset to its zero value.  The handler writes back the account's own state with
+    the desired one merged on top, so a value the model doesn't manage survives a
+    deploy that changes one that it does.
+    """
+    all_group = group_id(netbird, DEFAULT_GROUP)
+
+    compile_model(zone_model(name=ZONE_NAME, distribution_groups=[all_group]))
+    project.deploy_resource("netbird::DnsZone")
+
+    zone = find_zone(netbird, ZONE_DOMAIN)
+    netbird.put(
+        f"{netbird.base_url}/dns/zones/{zone['id']}",
+        json={
+            "name": ZONE_NAME,
+            "domain": ZONE_DOMAIN,
+            "distribution_groups": [all_group],
+            "enabled": False,
+            "enable_search_domain": True,
+        },
+    ).raise_for_status()
+
+    # Neither flag is managed: the deploy leaves both as the dashboard set them.
+    compile_model(zone_model(name=ZONE_NAME, distribution_groups=[all_group]))
+    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+    zone = find_zone(netbird, ZONE_DOMAIN)
+    assert zone["enabled"] is False
+    assert zone["enable_search_domain"] is True
+
+    # Changing the name doesn't reset them either, even though the api takes the
+    # whole object on the update that carries the new name.
+    compile_model(zone_model(name="Renamed zone"))
+    project.deploy_resource("netbird::DnsZone")
+    zone = find_zone(netbird, ZONE_DOMAIN)
+    assert zone["name"] == "Renamed zone"
+    assert zone["enabled"] is False
+    assert zone["enable_search_domain"] is True
+    assert zone["distribution_groups"] == [all_group]
+
+
+def test_zone_distribution_groups_order_is_not_a_change(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    The distribution groups are a set, and the api keeps them in the order they were
+    sent: listing the same groups in another order must not show up as a change.
+    """
+    all_group = group_id(netbird, DEFAULT_GROUP)
+    netbird.post(
+        f"{netbird.base_url}/groups", json={"name": "other"}
+    ).raise_for_status()
+    other_group = group_id(netbird, "other")
+
+    compile_model(
+        zone_model(name=ZONE_NAME, distribution_groups=[all_group, other_group])
+    )
+    project.deploy_resource("netbird::DnsZone")
+    assert sorted(find_zone(netbird, ZONE_DOMAIN)["distribution_groups"]) == sorted(
+        [all_group, other_group]
+    )
+
+    compile_model(
+        zone_model(name=ZONE_NAME, distribution_groups=[other_group, all_group])
+    )
+    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+
+
+def test_record_created_updated_and_purged(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    A record is created under its zone, which it points at by the id the zone's
+    handler publishes, and the values the model manages are kept in line with it.
+    """
+    all_group = group_id(netbird, DEFAULT_GROUP)
+    model = zone_model(name=ZONE_NAME, distribution_groups=[all_group])
+
+    compile_model(model + "\n" + record_model(type="A", content="10.0.0.1", ttl=300))
+    project.deploy_resource("netbird::DnsZone")
+    project.deploy_resource("netbird::DnsZoneRecord")
+
+    zone = find_zone(netbird, ZONE_DOMAIN)
+    record = find_record(netbird, zone["id"], RECORD_NAME)
+    assert record is not None
+    assert record["type"] == "A"
+    assert record["content"] == "10.0.0.1"
+    assert record["ttl"] == 300
+
+    # A second deploy of the same desired state changes nothing.
+    compile_model(model + "\n" + record_model(type="A", content="10.0.0.1", ttl=300))
+    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+    project.deploy_resource("netbird::DnsZoneRecord", change=const.Change.nochange)
+
+    compile_model(model + "\n" + record_model(type="A", content="10.0.0.2"))
+    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+    project.deploy_resource("netbird::DnsZoneRecord")
+    record = find_record(netbird, zone["id"], RECORD_NAME)
+    assert record["content"] == "10.0.0.2"
+    # The api resets a ttl left out of the update to zero.  The model doesn't manage
+    # it anymore, and the handler carries the account's own value along.
+    assert record["ttl"] == 300
+
+    compile_model(
+        model + "\n" + record_model(type="A", content="10.0.0.2", purged=True)
+    )
+    project.deploy_resource("netbird::DnsZone", change=const.Change.nochange)
+    project.deploy_resource("netbird::DnsZoneRecord")
+    assert find_record(netbird, zone["id"], RECORD_NAME) is None

@@ -138,3 +138,78 @@ end
 index User(api, name)
 
 implement User using parents
+
+
+entity DnsZone extends JsonObjectABC:
+    """
+    Manage a dns zone of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/dns-zones
+
+    A zone is identified by its domain: the api refuses a second zone on a domain it
+    already serves, while two zones may well carry the same name.  The domain is
+    fixed once the zone exists, the api rejects a change to it.
+
+    Every other attribute left null is not managed, and keeps whatever value the
+    account holds for it.  The api does require the name and at least one
+    distribution group to create a zone that doesn't exist yet.
+
+    :attr domain: The dns domain the zone is authoritative for, which is what
+        identifies it.  The api only takes it when the zone is created.
+    :attr name: The name of the zone, as shown in the dashboard.
+    :attr enabled: Whether the zone is served to the peers of the account.
+    :attr enable_search_domain: Whether the domain is pushed to the peers as a search
+        domain, so that they can resolve the names in it unqualified.
+    :attr distribution_groups: The ids of the groups whose peers the zone is
+        distributed to.  The api requires at least one, it rejects an empty list.
+    """
+    string domain
+    string? name = null
+    bool? enabled = null
+    bool? enable_search_domain = null
+    string[]? distribution_groups = null
+end
+
+index DnsZone(api, domain)
+
+implement DnsZone using parents
+
+
+typedef dns_record_type_t as string matching self in ["A", "AAAA", "CNAME"]
+
+
+entity DnsZoneRecord extends JsonObjectABC:
+    """
+    Manage a dns record of a zone of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/dns-zones
+
+    The api gives a record no natural key of its own: the name, the type and the
+    content can all be changed on an existing record, and it only refuses a second
+    record when all three are identical.  This resource addresses a record by its
+    name and type, which is the one record set the api can hold for a given name and
+    type, and it is not able to manage several records sharing both.
+
+    :attr _zone: The id of the zone holding this record.  Take it from the
+        ``id`` of the ``netbird::DnsZone`` resource rather than writing it down:
+        the api addresses the zone by an opaque id the model never knows.  The
+        leading underscore keeps it out of the body sent to the api, which takes
+        the zone from the url instead.
+    :attr name: The fully qualified name of the record.  The api rejects a name that
+        is not under the domain of the zone.
+    :attr type: The type of the record.
+    :attr content: The value of the record: an address for an ``A`` or ``AAAA``
+        record, a target name for a ``CNAME`` one.  The api requires one on every
+        call, so it is not optional.
+    :attr ttl: How long, in seconds, a resolver may cache the record.
+    """
+    string _zone
+    string name
+    dns_record_type_t type
+    string content
+    int? ttl = null
+end
+
+index DnsZoneRecord(api, name, type)
+
+implement DnsZoneRecord using parents

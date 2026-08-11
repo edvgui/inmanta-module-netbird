@@ -27,6 +27,7 @@ from inmanta_plugins.files.json import Operation, serialize_for_resource, update
 import inmanta.agent.handler
 import inmanta.execute.proxy
 import inmanta.export
+import inmanta.plugins
 import inmanta.resources
 from inmanta.util import dict_path
 from inmanta_plugins.netbird.helpers import Session
@@ -367,5 +368,235 @@ class UserHandler(HandlerABC[UserResource]):
     ) -> None:
         process_netbird_response(
             self.session.delete(url=f"users/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
+
+
+# The keys of the zone object the api takes.  It takes the same ones on a create and
+# on an update, and it requires the name, the domain and the distribution groups on
+# both.  The domain can not be changed once the zone exists, but it still has to be
+# sent along on every update.
+ZONE_KEYS = (
+    "name",
+    "domain",
+    "enabled",
+    "enable_search_domain",
+    "distribution_groups",
+)
+
+
+def find_dns_zone(session: Session, domain: str) -> dict | None:
+    """
+    Find a dns zone of the account by the domain it serves, and return None if it
+    doesn't exist.  The domain is what identifies a zone: the api refuses a second
+    zone on a domain it already serves, while it happily holds two zones of the same
+    name.
+    """
+    zones = process_netbird_response(
+        session.get(url="dns/zones"),
+        expected_type=list[dict],
+    )
+    return next((z for z in zones if z["domain"] == domain), None)
+
+
+@inmanta.resources.resource("netbird::DnsZone", "domain", "api.agent_name")
+class DnsZoneResource(ResourceABC):
+    fields = ("domain",)
+    domain: str
+
+
+@inmanta.agent.handler.provider("netbird::DnsZone", "")
+class DnsZoneHandler(HandlerABC[DnsZoneResource]):
+    def diff_body(self, body: dict) -> dict:
+        # The zone the api returns carries the records it holds, which are managed by
+        # netbird::DnsZoneRecord and are not part of what this resource writes.
+        return select(body, ZONE_KEYS)
+
+    def normalize(self, body: dict) -> dict:
+        # The api keeps the distribution groups in the order they were sent, but they
+        # are a set: listing the same groups in another order is not a change.
+        if body.get("distribution_groups") is not None:
+            body["distribution_groups"] = sorted(body["distribution_groups"])
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsZoneResource,
+    ) -> None:
+        zone = find_dns_zone(self.session, resource.domain)
+        if zone is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", zone["id"])
+        self.publish_ids(ctx, id=zone["id"])
+
+        resource.body = self.normalize(zone)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsZoneResource,
+    ) -> None:
+        zone = process_netbird_response(
+            self.session.post(
+                url="dns/zones",
+                json=select(self.merged_body({}, resource), ZONE_KEYS),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=zone["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: DnsZoneResource,
+    ) -> None:
+        # The update replaces the whole zone: every key left out of the body is reset
+        # to its zero value, and the api requires the name, the domain and the
+        # distribution groups anyway.  The merged body carries them all.
+        process_netbird_response(
+            self.session.put(
+                url=f"dns/zones/{ctx.get('ID')}",
+                json=select(resource.body, ZONE_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsZoneResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(url=f"dns/zones/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
+
+
+# The keys of a record the api takes.  The same ones on a create and on an update,
+# and it requires the name, the type and the content on both.
+RECORD_KEYS = ("name", "type", "content", "ttl")
+
+
+def find_dns_zone_record(
+    session: Session, zone: str, name: str, type: str
+) -> dict | None:
+    """
+    Find a record of a dns zone by its name and its type, and return None if it
+    doesn't exist.
+
+    The api gives a record no key of its own: it only refuses a new one when the
+    name, the type and the content are all three identical to an existing one.  This
+    module addresses a record by its name and its type, and refuses to guess which
+    one is meant when the zone holds several of them.
+
+    :param zone: The id of the zone holding the record.
+    :param name: The fully qualified name of the record.
+    :param type: The type of the record.
+    """
+    records = process_netbird_response(
+        session.get(url=f"dns/zones/{zone}/records"),
+        expected_type=list[dict],
+    )
+    matches = [r for r in records if r["name"] == name and r["type"] == type]
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"The zone holds {len(matches)} {type} records named {name}, which this "
+            "resource can not tell apart"
+        )
+
+    return matches[0] if matches else None
+
+
+@inmanta.resources.resource("netbird::DnsZoneRecord", "key", "api.agent_name")
+class DnsZoneRecordResource(ResourceABC):
+    fields = ("key", "zone", "name", "type")
+    key: str
+    zone: str
+    name: str
+    type: str
+
+    @classmethod
+    def get_key(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        # A record is identified by its name together with its type: an api the model
+        # addresses by name alone could not hold both an A and an AAAA record for the
+        # same name, which is an ordinary thing for a dual stack host.
+        return f"{entity.name}/{entity.type}"
+
+    @classmethod
+    def get_zone(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        # The zone is the opaque id of another resource, which the model only knows as
+        # a reference resolved on the agent.  It is kept out of the body sent to the
+        # api, which takes the zone from the url instead, hence the leading underscore
+        # on the model attribute.
+        return inmanta.plugins.allow_reference_values(entity)._zone
+
+
+@inmanta.agent.handler.provider("netbird::DnsZoneRecord", "")
+class DnsZoneRecordHandler(HandlerABC[DnsZoneRecordResource]):
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsZoneRecordResource,
+    ) -> None:
+        record = find_dns_zone_record(
+            self.session, resource.zone, resource.name, resource.type
+        )
+        if record is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", record["id"])
+        self.publish_ids(ctx, id=record["id"])
+
+        resource.body = self.normalize(record)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsZoneRecordResource,
+    ) -> None:
+        record = process_netbird_response(
+            self.session.post(
+                url=f"dns/zones/{resource.zone}/records",
+                json=select(self.merged_body({}, resource), RECORD_KEYS),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=record["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: DnsZoneRecordResource,
+    ) -> None:
+        # The update replaces the whole record: a ttl left out of the body is reset to
+        # zero, so the merged body is what has to be written back, not the change.
+        process_netbird_response(
+            self.session.put(
+                url=f"dns/zones/{resource.zone}/records/{ctx.get('ID')}",
+                json=select(resource.body, RECORD_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsZoneRecordResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(
+                url=f"dns/zones/{resource.zone}/records/{ctx.get('ID')}"
+            ),
         )
         ctx.set_purged()
