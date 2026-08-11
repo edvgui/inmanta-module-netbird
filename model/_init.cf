@@ -138,3 +138,49 @@ end
 index User(api, name)
 
 implement User using parents
+
+
+entity Peer extends JsonObjectABC:
+    """
+    Manage a peer that has joined the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/peers
+
+    A peer can not be created through the api: it comes into existence by registering
+    itself with a setup key or an sso login.  This resource therefore adopts a peer
+    that already joined, keeps the settings the api lets us change in line with the
+    model, and removes the peer from the account when it is purged.  Deploying it for
+    a peer that has not registered yet skips, loudly: there is nothing the handler
+    could do to make that desired state true.
+
+    The peer is identified by its hostname rather than by its name: the name is one of
+    the values this resource manages, and an object can not be found back by a value
+    the model rewrites.  The hostname is what the peer reports about itself when it
+    registers, and the api offers no way to change it, so it is the only stable handle
+    on a peer besides the id the model never knows.
+
+    Every attribute but the hostname is optional, and left null it is not managed: the
+    peer keeps whatever value the account holds for it.
+
+    :attr hostname: The hostname the peer reported when it registered, which is what
+        identifies it.  It is not settable.
+    :attr name: The name of the peer on the account, which its dns label is derived
+        from.  It defaults to the hostname when the peer registers.
+    :attr ssh_enabled: Whether the netbird ssh server runs on the peer.
+    :attr login_expiration_enabled: Whether the peer's login expires and has to be
+        renewed interactively.  The api rejects enabling it on a peer that joined with
+        a setup key rather than with an sso login.
+    :attr inactivity_expiration_enabled: Whether the peer's session expires while it
+        is disconnected.  The api rejects enabling it on a peer that joined with a
+        setup key rather than with an sso login.
+    """
+    string hostname
+    string? name = null
+    bool? ssh_enabled = null
+    bool? login_expiration_enabled = null
+    bool? inactivity_expiration_enabled = null
+end
+
+index Peer(api, hostname)
+
+implement Peer using parents

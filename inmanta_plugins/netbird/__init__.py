@@ -369,3 +369,106 @@ class UserHandler(HandlerABC[UserResource]):
             self.session.delete(url=f"users/{ctx.get('ID')}"),
         )
         ctx.set_purged()
+
+
+def find_peer(session: Session, hostname: str) -> dict | None:
+    """
+    Find a peer of the account by its hostname, and return None when no peer with that
+    hostname joined the account.
+
+    The hostname is what identifies a peer here: its name is settable, and a peer this
+    module renames could not be found back by it.
+
+    :param session: The session towards the api of the account.
+    :param hostname: The hostname the peer reported when it registered.
+    """
+    peers = process_netbird_response(
+        session.get(url="peers"),
+        expected_type=list[dict],
+    )
+    return next((p for p in peers if p["hostname"] == hostname), None)
+
+
+# The keys of the peer object the api takes when a peer is updated.  There is no
+# create: a peer joins the account on its own.  The update is a full replacement of
+# these keys and of nothing else, so every one of them has to be sent on every call.
+PEER_UPDATE_KEYS = (
+    "name",
+    "ssh_enabled",
+    "login_expiration_enabled",
+    "inactivity_expiration_enabled",
+)
+
+
+@inmanta.resources.resource("netbird::Peer", "hostname", "api.agent_name")
+class PeerResource(ResourceABC):
+    fields = ("hostname",)
+    hostname: str
+
+
+@inmanta.agent.handler.provider("netbird::Peer", "")
+class PeerHandler(HandlerABC[PeerResource]):
+    def diff_body(self, body: dict) -> dict:
+        # The api only takes PEER_UPDATE_KEYS on an update, and everything else it
+        # reports about a peer is either the peer's own doing or managed from the
+        # other end of the relation.  Comparing those would report a change on every
+        # deploy that the update could never enforce.
+        return select(body, PEER_UPDATE_KEYS)
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: PeerResource,
+    ) -> None:
+        peer = find_peer(self.session, resource.hostname)
+        if peer is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", peer["id"])
+        self.publish_ids(ctx, id=peer["id"])
+
+        resource.body = self.normalize(peer)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: PeerResource,
+    ) -> None:
+        # A peer can only join the account by registering itself with a setup key or
+        # an sso login, the api has no endpoint to create one.  Doing nothing here
+        # would report a deploy that made the desired state true while it did not, so
+        # the handler skips instead, and says why.
+        raise inmanta.agent.handler.SkipResource(
+            f"No peer with hostname {resource.hostname} has joined this netbird "
+            "account.  A peer can not be created through the api: it has to register "
+            "itself with a setup key or an sso login first, and this resource then "
+            "adopts it."
+        )
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: PeerResource,
+    ) -> None:
+        # The update replaces every key it takes, and reads a key the body leaves out
+        # as its zero value: leaving one out doesn't keep it, it resets it to false.
+        # The body calculate_diff merged holds the values the model has no opinion
+        # about, which is what keeps them from being reset here.
+        process_netbird_response(
+            self.session.put(
+                url=f"peers/{ctx.get('ID')}",
+                json=select(resource.body, PEER_UPDATE_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: PeerResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(url=f"peers/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
