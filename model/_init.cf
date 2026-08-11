@@ -138,3 +138,92 @@ end
 index User(api, name)
 
 implement User using parents
+
+
+entity Nameserver extends files::json::SerializableEntity:
+    """
+    One dns server of a nameserver group.
+
+    The api holds the nameservers of a group as a list of objects, and the dsl has no
+    list-of-dict attribute type (`dict` is a keyword, `dict[]` doesn't parse), so this
+    is an embedded entity rather than an attribute of the group.  Each instance is one
+    entry of that list, keyed by its ip address: the model manages the servers it
+    names, and the api keeps the ones it doesn't.
+
+    :attr ip: The address of the dns server, which is what identifies it within its
+        group.
+    :attr ns_type: The protocol to query the server with.  The api only supports
+        `udp`.
+    :attr port: The port to query the server on.
+    """
+    string ip
+    string? ns_type = null
+    int? port = null
+end
+
+NameserverGroup.nameservers [0:] -- Nameserver.parent [1]
+"""
+The dns servers of the group.  This relation is two-way on purpose, unlike the ones
+between two api objects: the serializer derives the path of an embedded entity from
+the relation leading back to its parent.
+"""
+
+index Nameserver(parent, ip)
+
+implement Nameserver using parents
+
+
+entity NameserverGroup extends JsonObjectABC:
+    """
+    Manage a nameserver group of the netbird account: a set of dns servers, and the
+    peers that resolve their queries with them.
+
+    Api documentation: https://docs.netbird.io/api/resources/dns
+
+    Every attribute but the name is optional, and left null it is not managed: the
+    group keeps whatever value the account holds for it.  The api does require most
+    of them to create a group that doesn't exist yet.
+
+    :attr name: The name of the nameserver group, which is what identifies it.
+    :attr description: A description of the nameserver group.
+    :attr enabled: Whether the nameserver group is used at all.
+    :attr groups: The ids of the groups whose peers resolve with these nameservers.
+    :attr primary: Whether this group resolves every domain.  The api rejects a
+        primary group that also has domains, and a non-primary group without any.
+    :attr domains: The domains this group resolves, when it is not the primary one.
+    :attr search_domains_enabled: Whether the domains are also pushed to the peers
+        as search domains.  The api only takes it on a group that is not primary.
+    """
+    string name
+    string? description = null
+    bool? enabled = null
+    string[]? groups = null
+    bool? primary = null
+    string[]? domains = null
+    bool? search_domains_enabled = null
+end
+
+index NameserverGroup(api, name)
+
+implement NameserverGroup using parents
+
+
+entity DnsSettings extends JsonObjectABC:
+    """
+    Manage the dns settings of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/dns
+
+    These settings are a singleton of the account: they always exist, they can not be
+    created and they can not be deleted.  The resource only ever updates them, and
+    purging it is an error.
+
+    :attr disabled_management_groups: The ids of the groups whose peers netbird does
+        not manage the dns settings of.
+    """
+    string[]? disabled_management_groups = null
+end
+
+index DnsSettings(api)
+
+implement DnsSettings using parents

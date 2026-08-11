@@ -369,3 +369,183 @@ class UserHandler(HandlerABC[UserResource]):
             self.session.delete(url=f"users/{ctx.get('ID')}"),
         )
         ctx.set_purged()
+
+
+def find_nameserver_group(session: Session, name: str) -> dict | None:
+    """
+    Find a nameserver group of the account by its name, and return None if it doesn't
+    exist.  The api has no endpoint to look a group up by anything but its id, which
+    the model doesn't know, so the listing is filtered here.
+    """
+    groups = process_netbird_response(
+        session.get(url="dns/nameservers"),
+        expected_type=list[dict],
+    )
+    return next((g for g in groups if g["name"] == name), None)
+
+
+# The keys of the nameserver group object the api takes.  The create and the update
+# endpoint take the same ones, and both require the full object.
+NAMESERVER_GROUP_KEYS = (
+    "name",
+    "description",
+    "nameservers",
+    "enabled",
+    "groups",
+    "primary",
+    "domains",
+    "search_domains_enabled",
+)
+
+
+@inmanta.resources.resource("netbird::NameserverGroup", "name", "api.agent_name")
+class NameserverGroupResource(ResourceABC):
+    fields = ("name",)
+    name: str
+
+
+@inmanta.agent.handler.provider("netbird::NameserverGroup", "")
+class NameserverGroupHandler(HandlerABC[NameserverGroupResource]):
+    def normalize(self, body: dict) -> dict:
+        # The api doesn't preserve the order of the distribution groups, nor of the
+        # domains.  The nameservers are deliberately left alone: they are queried in
+        # the order they are written in, so that order is part of the desired state.
+        for key in ("groups", "domains"):
+            if body.get(key) is not None:
+                body[key] = sorted(body[key])
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NameserverGroupResource,
+    ) -> None:
+        group = find_nameserver_group(self.session, resource.name)
+        if group is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", group["id"])
+        self.publish_ids(ctx, id=group["id"])
+
+        resource.body = self.normalize(group)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NameserverGroupResource,
+    ) -> None:
+        group = process_netbird_response(
+            self.session.post(
+                url="dns/nameservers",
+                json=select(self.merged_body({}, resource), NAMESERVER_GROUP_KEYS),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=group["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: NameserverGroupResource,
+    ) -> None:
+        # The api requires the full object on an update, even the parts the model has
+        # no opinion about: the body calculate_diff merged carries them along.
+        process_netbird_response(
+            self.session.put(
+                url=f"dns/nameservers/{ctx.get('ID')}",
+                json=select(resource.body, NAMESERVER_GROUP_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: NameserverGroupResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(url=f"dns/nameservers/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
+
+
+# The only key of the dns settings object, which the api takes on an update.  There
+# is no create and no delete endpoint: the settings are a singleton of the account.
+DNS_SETTINGS_KEYS = ("disabled_management_groups",)
+
+
+@inmanta.resources.resource("netbird::DnsSettings", "agent_name", "api.agent_name")
+class DnsSettingsResource(ResourceABC):
+    # The dns settings are a singleton of the account, they have no identity of their
+    # own: the agent managing the api is what tells two of them apart.
+    fields = ("agent_name",)
+    agent_name: str
+
+    @classmethod
+    def get_agent_name(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity.api.agent_name
+
+
+@inmanta.agent.handler.provider("netbird::DnsSettings", "")
+class DnsSettingsHandler(HandlerABC[DnsSettingsResource]):
+    def normalize(self, body: dict) -> dict:
+        # The api doesn't preserve the order of the groups
+        if body.get("disabled_management_groups") is not None:
+            body["disabled_management_groups"] = sorted(
+                body["disabled_management_groups"]
+            )
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsSettingsResource,
+    ) -> None:
+        # The settings of an account always exist, so this never reports the resource
+        # as purged: there is only ever an update to do.
+        resource.body = self.normalize(
+            process_netbird_response(
+                self.session.get(url="dns/settings"),
+                expected_type=dict,
+            )
+        )
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsSettingsResource,
+    ) -> None:
+        raise RuntimeError(
+            "The dns settings of a netbird account always exist, they can not be "
+            "created"
+        )
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: DnsSettingsResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.put(
+                url="dns/settings",
+                json=select(resource.body, DNS_SETTINGS_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: DnsSettingsResource,
+    ) -> None:
+        raise RuntimeError(
+            "The dns settings of a netbird account can not be deleted, this resource "
+            "should not be purged"
+        )
