@@ -1284,8 +1284,10 @@ class DnsZoneHandler(HandlerABC[DnsZoneResource]):
         ctx.set_purged()
 
 
-# The keys of a record the api takes.  The same ones on a create and on an update,
-# and it requires the name, the type and the content on both.
+# The keys of a record the api takes.  The same ones on a create and on an update, and
+# it requires the name, the type and the content on both, even on an update that
+# changes none of them.  Only the ttl is optional, and a call that leaves it out sets
+# it to zero rather than keeping it, which is why the update writes the merged body.
 RECORD_KEYS = ("name", "type", "content", "ttl")
 
 
@@ -1300,6 +1302,10 @@ def find_dns_zone_record(
     name, the type and the content are all three identical to an existing one.  This
     module addresses a record by its name and its type, and refuses to guess which
     one is meant when the zone holds several of them.
+
+    The listing of a zone the account doesn't hold answers with an empty list rather
+    than a 404, so a record pointed at a zone that is gone reads as a record still to
+    create, and it is the create that reports the missing zone.
 
     :param zone: The id of the zone holding the record.
     :param name: The fully qualified name of the record.

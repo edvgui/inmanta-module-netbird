@@ -489,6 +489,12 @@ implement DnsZone using parents
 
 
 typedef dns_record_type_t as string matching self in ["A", "AAAA", "CNAME"]
+"""
+The record types the api takes.  This is not a narrowing of what dns can hold, it is
+the whole list the api accepts: everything else (`TXT`, `MX`, `NS`, `SRV`, `PTR`,
+`CAA`, `SOA`) is answered with `invalid record type, must be a, aaaa, or cname`.  The
+api spells them upper case despite what that message suggests, `a` is rejected too.
+"""
 
 
 entity DnsZoneRecord extends JsonObjectABC:
@@ -508,13 +514,19 @@ entity DnsZoneRecord extends JsonObjectABC:
         the api addresses the zone by an opaque id the model never knows.  The
         leading underscore keeps it out of the body sent to the api, which takes
         the zone from the url instead.
-    :attr name: The fully qualified name of the record.  The api rejects a name that
-        is not under the domain of the zone.
-    :attr type: The type of the record.
-    :attr content: The value of the record: an address for an ``A`` or ``AAAA``
-        record, a target name for a ``CNAME`` one.  The api requires one on every
-        call, so it is not optional.
-    :attr ttl: How long, in seconds, a resolver may cache the record.
+    :attr name: The fully qualified name of the record, the domain of the zone
+        included: the api rejects a relative name, a name outside of the zone and a
+        name with a trailing dot.  The domain of the zone itself is a valid name.  The
+        api stores the name as it is written here, it doesn't lower case it.
+    :attr type: The type of the record.  The api takes only the three types
+        `dns_record_type_t` allows.
+    :attr content: The value of the record: an ipv4 address for an ``A`` record, an
+        ipv6 address for an ``AAAA`` one, a target name without a trailing dot for a
+        ``CNAME``.  The api validates it against the type, and requires it on every
+        call, so it is not optional.  It is stored as it is written here, an address
+        is not canonicalized.
+    :attr ttl: How long, in seconds, a resolver may cache the record.  The api takes
+        no negative value, and stores zero for a record created without one.
     """
     string _zone
     string name
