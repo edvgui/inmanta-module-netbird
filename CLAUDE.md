@@ -109,9 +109,9 @@ Two hooks to override:
   empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
   account doesn't know is dropped silently.  `PUT /api/groups/{id}` replaces the whole
   group: a key left out of it is emptied.
-- Only one netbird server can run on a host at a time: it binds a hardcoded `:33073` for
-  the management grpc, which the config file does not move.  Two `--network host`
-  containers therefore fight over it, and the second one exits.
+- The server binds a hardcoded `:33073` for the management grpc, which no config key
+  moves.  Two servers sharing a network namespace fight over it and the second one
+  exits — hence the namespace per container, see below.
 
 ## Testing
 
@@ -127,13 +127,22 @@ pytest tests
 - The account is set up through `POST /api/setup` with `NB_SETUP_PAT_ENABLED=true`,
   which mints the PAT the tests drive the api with.  No IdP, no dashboard (netbird ≥
   0.62 has built-in local users).
-- The server runs `--network host` and binds the ports itself.  Do not switch to
-  published ports: rootless podman can't publish to the host loopback when it itself
-  runs in a container, which is exactly the CI setup.
-- Ports come from `free_port()` (bind `:0`, read it back, close), so another process can
-  take one in the gap.  `start_server` retries `SERVER_START_ATTEMPTS` times on a fresh
-  set.  The container runs **without `--rm`** on purpose: a server that dies on startup
-  would otherwise take its logs with it, and those logs are all `wait_until` can report.
+- **Several copies of the suite can run next to each other on one host**, which is what
+  every container getting a network namespace of its own buys.  Never `--network host`:
+  the servers would collide on `:33073` and the peer clients on their wireguard
+  interface.  Give a new container its `--network` from `pasta_network()`.
+- Forwarding is `pasta:--tcp-ports,<host>:<container>`, **not `--publish`**: podman's own
+  port forwarder silently does not forward when rootless podman itself runs inside a
+  container, which is exactly the CI setup.  Verified both ways in
+  `quay.io/podman/stable`.
+- The api port is the same number inside the container and on the host, because
+  `exposedAddress` (the url peers are told to come back on) has to be valid in both.
+  Every other port the server binds keeps its default: they are namespace-private now.
+- The api port comes from `free_port()` (bind `:0`, read it back, close), so another
+  process can take it in the gap.  `start_server` retries `SERVER_START_ATTEMPTS` times
+  on a fresh port.  The container runs **without `--rm`** on purpose: a server that dies
+  on startup would otherwise take its logs with it, and those logs are all `wait_until`
+  can report.
 - Helpers are plain functions, not fixtures: `get(netbird, path)`, `facts(project)`.
   `compile_model` is a fixture because it closes over both `project` and `netbird`.
 - Build test models with `json.dumps` — json literals are valid dsl for the primitive
