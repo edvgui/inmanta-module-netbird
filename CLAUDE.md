@@ -95,6 +95,12 @@ Two hooks to override:
   neither is what you are changing — hence the merged body.  `is_blocked` is only taken
   on the `PUT`, so a user the model wants blocked from the start needs a create
   followed by an update.
+- `PUT /api/peers/{id}` **replaces** the keys it takes: one left out of the body is read
+  as its go zero value and written, so `{"name": "x"}` silently resets `ssh_enabled` to
+  false.  It also requires `name` on every call (`500` without).  There is no
+  `POST /api/peers` — a peer registers itself, so `create_resource` raises
+  `SkipResource`.  `approval_required` and `extra_dns_labels` are accepted and silently
+  ignored; don't model a key the api drops, it can never converge.
 - A **service user has no email address**: the api stores `""` whatever you send.  Its
   `name` is the only thing left to identify it, which is why `netbird::User` is indexed
   on the name for regular and service users alike.
@@ -102,7 +108,16 @@ Two hooks to override:
   a boolean query parameter; a non-boolean value is not a "give me everything" wildcard.
 - A listing endpoint with nothing to list can answer json `null` instead of `[]` —
   `process_netbird_response` turns that into `[]` for a `list[...]` expected type.
-- A fresh account already has an `All` group and a `Default` policy.
+- A fresh account already has an `All` group and a `Default` policy.  The api refuses to
+  rename it (422) or to delete it (400).
+- `GET /api/groups` reports `peers` as a list of `{id, name}` objects, but `POST`/`PUT`
+  only take a list of peer ids and answer 400 on the shape the api returned itself.  An
+  empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
+  account doesn't know is dropped silently.  `PUT /api/groups/{id}` replaces the whole
+  group: a key left out of it is emptied.
+- The server binds a hardcoded `:33073` for the management grpc, which no config key
+  moves.  Two servers sharing a network namespace fight over it and the second one
+  exits — hence the namespace per container, see below.
 
 ## Testing
 
@@ -118,13 +133,22 @@ pytest tests
 - The account is set up through `POST /api/setup` with `NB_SETUP_PAT_ENABLED=true`,
   which mints the PAT the tests drive the api with.  No IdP, no dashboard (netbird ≥
   0.62 has built-in local users).
-- The server runs `--network host` and binds the ports itself.  Do not switch to
-  published ports: rootless podman can't publish to the host loopback when it itself
-  runs in a container, which is exactly the CI setup.
-- Ports come from `free_port()` (bind `:0`, read it back, close), so another process can
-  take one in the gap.  `start_server` retries `SERVER_START_ATTEMPTS` times on a fresh
-  set.  The container runs **without `--rm`** on purpose: a server that dies on startup
-  would otherwise take its logs with it, and those logs are all `wait_until` can report.
+- **Several copies of the suite can run next to each other on one host**, which is what
+  every container getting a network namespace of its own buys.  Never `--network host`:
+  the servers would collide on `:33073` and the peer clients on their wireguard
+  interface.  Give a new container its `--network` from `pasta_network()`.
+- Forwarding is `pasta:--tcp-ports,<host>:<container>`, **not `--publish`**: podman's own
+  port forwarder silently does not forward when rootless podman itself runs inside a
+  container, which is exactly the CI setup.  Verified both ways in
+  `quay.io/podman/stable`.
+- The api port is the same number inside the container and on the host, because
+  `exposedAddress` (the url peers are told to come back on) has to be valid in both.
+  Every other port the server binds keeps its default: they are namespace-private now.
+- The api port comes from `free_port()` (bind `:0`, read it back, close), so another
+  process can take it in the gap.  `start_server` retries `SERVER_START_ATTEMPTS` times
+  on a fresh port.  The container runs **without `--rm`** on purpose: a server that dies
+  on startup would otherwise take its logs with it, and those logs are all `wait_until`
+  can report.
 - Helpers are plain functions, not fixtures: `get(netbird, path)`, `facts(project)`.
   `compile_model` is a fixture because it closes over both `project` and `netbird`.
 - Build test models with `json.dumps` — json literals are valid dsl for the primitive
