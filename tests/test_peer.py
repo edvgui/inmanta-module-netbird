@@ -24,7 +24,7 @@ import inmanta_plugins.std
 import pytest
 import pytest_inmanta.plugin
 import requests
-from conftest import facts, get, wait_until
+from conftest import facts, get, pasta_network, wait_until
 
 import inmanta.plugins
 from inmanta import const
@@ -69,12 +69,15 @@ def peer(netbird: requests.Session) -> collections.abc.Iterator[dict]:
             "podman",
             "run",
             "-d",
-            # Same host network as the server, and the capability the client needs to
-            # set up its wireguard interface.
+            # A network namespace of its own, so that two clients started by two
+            # copies of the suite do not fight over the same wireguard interface, plus
+            # what it takes to set that interface up.
             "--network",
-            "host",
+            pasta_network({}),
             "--cap-add",
             "NET_ADMIN",
+            "--device",
+            "/dev/net/tun",
             "-e",
             f"NB_SETUP_KEY={key.json()['key']}",
             "-e",
