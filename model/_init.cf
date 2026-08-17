@@ -140,6 +140,34 @@ index User(api, name)
 implement User using parents
 
 
+entity Group extends JsonObjectABC:
+    """
+    Manage a group of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/groups
+
+    A group is what every access rule of the account is expressed in terms of: it
+    holds peers, and the policies, setup keys, users and dns settings point at it.
+
+    Every fresh account comes with an `All` group holding all of its peers, which the
+    api refuses to rename or to delete.  Managing it with this resource only works as
+    long as the model asks for nothing the api would have to change.
+
+    :attr name: The name of the group, which is what identifies it.  The api rejects
+        a second group with a name it already has.
+    :attr peers: The ids of the peers that are members of the group.  The api reports
+        each of them as an object, but only takes ids on a write: the handler sends
+        back the ids.  An id the account doesn't know is dropped silently.
+    """
+    string name
+    string[]? peers = null
+end
+
+index Group(api, name)
+
+implement Group using parents
+
+
 typedef setup_key_type_t as string matching self in ["one-off", "reusable"]
 
 

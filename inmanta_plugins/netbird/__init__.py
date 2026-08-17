@@ -144,6 +144,19 @@ def find_user(session: Session, name: str) -> dict | None:
     return next((u for u in users if u["name"] == name), None)
 
 
+def find_group(session: Session, name: str) -> dict | None:
+    """
+    Find a group of the account by its name, and return None if it doesn't exist.
+    The api rejects a second group with a name it already holds, so the name
+    identifies one group at most.
+    """
+    groups = process_netbird_response(
+        session.get(url="groups"),
+        expected_type=list[dict],
+    )
+    return next((g for g in groups if g["name"] == name), None)
+
+
 NR = typing.TypeVar("NR", bound=ResourceABC)
 
 
@@ -367,6 +380,98 @@ class UserHandler(HandlerABC[UserResource]):
     ) -> None:
         process_netbird_response(
             self.session.delete(url=f"users/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()
+
+
+# The keys of the group object the api takes.  The create and the update endpoints
+# take the same ones here, and both replace the whole object: a key left out of a PUT
+# is emptied, which is why the merged body carries the values the model has no opinion
+# about (the network resources of the group) along.  Everything else the api reports
+# it computes on its own.
+GROUP_KEYS = ("name", "peers", "resources")
+
+
+@inmanta.resources.resource("netbird::Group", "name", "api.agent_name")
+class GroupResource(ResourceABC):
+    fields = ("name",)
+    name: str
+
+
+@inmanta.agent.handler.provider("netbird::Group", "")
+class GroupHandler(HandlerABC[GroupResource]):
+    def diff_body(self, body: dict) -> dict:
+        # Only the keys the api takes on a write take part in the diff: the id, the
+        # issuer and the counts it reports are computed, and a difference on one of
+        # them is not something the handler could enforce.
+        return select(body, GROUP_KEYS)
+
+    def normalize(self, body: dict) -> dict:
+        # The api reports each member of the group as an object, but only takes the
+        # peer ids on a write, and rejects the shape it returned itself.  The
+        # canonical shape is therefore the one the write takes.  An empty collection
+        # comes back as a json null rather than an empty list, on both collections.
+        body["peers"] = sorted(
+            peer["id"] if isinstance(peer, dict) else peer
+            for peer in body.get("peers") or []
+        )
+        body["resources"] = body.get("resources") or []
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: GroupResource,
+    ) -> None:
+        group = find_group(self.session, resource.name)
+        if group is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", group["id"])
+        self.publish_ids(ctx, id=group["id"])
+
+        resource.body = self.normalize(group)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: GroupResource,
+    ) -> None:
+        group = process_netbird_response(
+            self.session.post(
+                url="groups",
+                json=select(self.merged_body({}, resource), GROUP_KEYS),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=group["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: GroupResource,
+    ) -> None:
+        # The body calculate_diff merged is the object as the api holds it, with the
+        # desired state applied on top.  The api replaces the whole group with what
+        # this call carries, so it has to be the complete one.
+        process_netbird_response(
+            self.session.put(
+                url=f"groups/{ctx.get('ID')}",
+                json=select(resource.body, GROUP_KEYS),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: GroupResource,
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(url=f"groups/{ctx.get('ID')}"),
         )
         ctx.set_purged()
 
