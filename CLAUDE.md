@@ -49,6 +49,19 @@ reading the `id` fact its resource publishes, so one resource feeds another
 Every handler publishes that fact on **both** the read and the create path — a create
 that didn't publish would leave the reference unresolvable until the next repair.
 
+**pytest-inmanta does resolve a fact reference at deploy time**: `project.deploy` calls
+`resource.resolve_all_references(ctx)` before the handler runs, so `resource.zone` is a
+plain string by the time a crud method sees it.  It resolves from mocked facts, which it
+does *not* fill with what a handler published: a test deploying an object addressed under
+another one's id seeds them itself, with
+`project.add_fact(parent_resource.id.resource_str(), "id", <id read off the api>)` — see
+`deploy_zone` in `tests/test_dns_zone.py` and `deploy_network` in `tests/test_network.py`.
+
+`std::create_fact_reference` **snapshots** those mocked facts into the reference at
+compile time, and only when the store is non-empty already: seed the fact **before** the
+compile that builds the reference.  A reference compiled with nothing seeded falls back to
+a real orchestrator client and fails the deploy with a bare `KeyError: 'data'`.
+
 ## Adding a resource for another api object
 
 1. **Probe the real api first.**  The docs at `https://docs.netbird.io/api/resources/*`
@@ -115,6 +128,25 @@ Two hooks to override:
   empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
   account doesn't know is dropped silently.  `PUT /api/groups/{id}` replaces the whole
   group: a key left out of it is emptied.
+- `POST /api/dns/zones` requires a `name`, a well formed `domain` and at least one
+  distribution group; a second zone on a domain the account serves is a 409, and
+  changing the domain of an existing zone a 422 (`zone domain cannot be updated`).  A
+  zone `PUT` ignores the `records` key and leaves the records of the zone alone, so a
+  zone update can not clobber the `netbird::DnsZoneRecord`s under it.
+- The dns zones live under `/api/dns/zones`, not `/api/dns-zones` (404), records under
+  `/api/dns/zones/{zone}/records`.  `GET` on the records of a zone the account does not
+  hold answers `200 []`, not 404, while `POST` into it answers 404: a record pointed at
+  a zone that is gone reads as still to create, and only the create says why.
+- A dns record takes only the types `A`, `AAAA` and `CNAME`, upper case (`a` is refused
+  too), everything else is a 422 `invalid record type, must be a, aaaa, or cname`.
+  `POST` and `PUT` both require `name`, `type` and `content` — the `PUT` even when
+  none of them is what changes — and both reset a `ttl` left out of the body to 0.  The
+  name must be fully qualified inside the zone's domain and carry no trailing dot; the
+  api validates `content` against the type (ipv4/ipv6/target name) and stores name and
+  content verbatim, so no normalization is needed.
+- Two records may share a name and a type as long as their content differs; the api only
+  refuses a record identical on all three (409).  `find_dns_zone_record` raises rather
+  than guessing which of two the model meant.
 - The server binds a hardcoded `:33073` for the management grpc, which no config key
   moves.  Two servers sharing a network namespace fight over it and the second one
   exits — hence the namespace per container, see below.
