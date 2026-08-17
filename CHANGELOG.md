@@ -5,4 +5,6 @@
 - Initial module structure
 - Manage the users and service users of a netbird account with the `netbird::User`
   resource
+- Manage the groups of a netbird account with the `netbird::Group` resource
+- Manage the setup keys of a netbird account with the `netbird::SetupKey` resource
 - Manage the peers that joined a netbird account with the `netbird::Peer` resource
