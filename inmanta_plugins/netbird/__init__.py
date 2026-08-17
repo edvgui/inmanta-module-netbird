@@ -698,7 +698,8 @@ class PeerHandler(HandlerABC[PeerResource]):
 # The keys of the network object the api takes, on a create as well as on an update.
 # Everything else it reports about a network (the routers, the resources and the
 # policies it holds) is computed from the objects that point at it, and can not be set
-# here.
+# here.  The update replaces both of them: one left out of the body is emptied, so the
+# merged body is what keeps the value the model has no opinion about.
 NETWORK_KEYS = ("name", "description")
 
 
@@ -775,7 +776,10 @@ class NetworkHandler(HandlerABC[Network]):
 
 
 # The keys of a network resource the api takes, on a create as well as on an update.
-# The type of the resource is not one of them: the api derives it from the address.
+# The type of the resource is not one of them: the api derives it from the address, and
+# ignores a type the body carries.  Both endpoints insist on the address and answer 500
+# without one, and the update replaces every other key: one left out of the body is
+# emptied, so the merged body is what keeps the values the model has no opinion about.
 NETWORK_RESOURCE_KEYS = ("name", "description", "address", "enabled", "groups")
 
 
@@ -815,9 +819,10 @@ class NetworkResourceHandler(HandlerABC[NetworkResource]):
             else:
                 body["address"] = f"{address}/{prefix_length}"
 
-        # The api reports the groups of a resource as objects while it takes them as
-        # ids, it doesn't preserve their order, and it reports a resource that is in no
-        # group at all with no list rather than an empty one.
+        # The api reports the groups of a resource as objects while it only takes them
+        # as ids, and answers 400 on the shape it returned itself.  It doesn't preserve
+        # their order, and reports a resource that is in no group at all with a json
+        # null rather than an empty list.
         if "groups" in body:
             body["groups"] = sorted(
                 group["id"] if isinstance(group, dict) else group
@@ -886,7 +891,12 @@ class NetworkResourceHandler(HandlerABC[NetworkResource]):
         ctx.set_purged()
 
 
-# The keys of a network router the api takes, on a create as well as on an update.
+# The keys of a network router the api takes, on a create as well as on an update.  The
+# update replaces every one of them: one left out of the body is written as its zero
+# value, so a body only carrying the metric silently disables the router.  Exactly one of
+# the two target keys has to hold something, on both endpoints, but an empty one next to
+# a filled one is fine: the merged body carrying `peer: ""` alongside `peer_groups` is
+# what the api itself reports for a router routing for groups.
 NETWORK_ROUTER_KEYS = ("peer", "peer_groups", "metric", "masquerade", "enabled")
 
 
@@ -894,6 +904,10 @@ def routing_target(body: dict) -> tuple[str | None, list[str]]:
     """
     The peer, or the peer groups, a router routes for.  The api gives a router no name
     of its own, this is the only thing it is known by.
+
+    The unused half of the pair is reported as an empty value rather than left out: a
+    router routing for groups carries `peer: ""`, one routing for a peer carries
+    `peer_groups: null`.
 
     :param body: A router, as the api holds it or as the model wants it.
     """
@@ -925,12 +939,15 @@ class NetworkRouter(ResourceABC):
 @inmanta.agent.handler.provider("netbird::NetworkRouter", "")
 class NetworkRouterHandler(HandlerABC[NetworkRouter]):
     def diff_body(self, body: dict) -> dict:
+        # Everything the api reports about a router but its id is settable, so this only
+        # keeps that id out of the diff.
         return select(body, NETWORK_ROUTER_KEYS)
 
     def normalize(self, body: dict) -> dict:
-        # The api doesn't preserve the order of the peer groups
-        if body.get("peer_groups") is not None:
-            body["peer_groups"] = sorted(body["peer_groups"])
+        # The api doesn't preserve the order of the peer groups, and reports a router
+        # that routes for a single peer with a json null rather than an empty list.
+        if "peer_groups" in body:
+            body["peer_groups"] = sorted(body["peer_groups"] or [])
 
         return body
 
