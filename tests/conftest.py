@@ -49,13 +49,39 @@ SERVER_START_ATTEMPTS = 3
 
 def free_port() -> int:
     """
-    Ask the kernel for a free port.  The netbird server binds several of them, and
-    they all default to fixed values that may well be taken on the machine running
-    the tests.
+    Ask the kernel for a free port.  The port the api is reached on is forwarded from
+    the host, and its default may well be taken on the machine running the tests.
     """
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def pasta_network(forwarded_ports: collections.abc.Mapping[int, int]) -> str:
+    """
+    The ``--network`` argument giving a container a network namespace of its own, with
+    the given ports forwarded into it from the host.
+
+    Every container these tests start needs a namespace of its own, so that several
+    copies of the suite can run next to each other on one machine: the netbird server
+    binds a hardcoded ``:33073`` for its management grpc whatever the configuration
+    says, and two netbird clients would both want the same wireguard interface.
+
+    Forwarding is done by pasta rather than by ``--publish``: podman's own port
+    forwarder does not work when rootless podman itself runs inside a container, which
+    is exactly the CI setup, while pasta binds the host port from the parent namespace
+    and works in both.
+
+    :param forwarded_ports: The ports to forward, host port to container port.  A
+        container needing no port forwarded still needs its own namespace.
+    """
+    if not forwarded_ports:
+        return "pasta"
+
+    ports = ",".join(
+        f"{host}:{container}" for host, container in forwarded_ports.items()
+    )
+    return f"pasta:--tcp-ports,{ports}"
 
 
 def server_config(*, api_port: int, path: pathlib.Path) -> pathlib.Path:
@@ -67,7 +93,13 @@ def server_config(*, api_port: int, path: pathlib.Path) -> pathlib.Path:
     from their own network namespace, so that a netbird client container could
     register and pick up the signal and relay urls that go with it.
 
-    :param api_port: The port the management api listens on.
+    Every other port the server binds (management grpc, stun, metrics, healthcheck)
+    is left at its default: the container has a network namespace of its own, so those
+    are private to it and can not collide with another server's.
+
+    :param api_port: The port the management api listens on, inside the container and
+        on the host alike — the same number on both ends keeps ``exposedAddress``
+        valid for peers.
     :param path: The directory to write the configuration file in.
     """
     peer_url = f"http://host.containers.internal:{api_port}"
@@ -78,9 +110,6 @@ def server_config(*, api_port: int, path: pathlib.Path) -> pathlib.Path:
                 "server": {
                     "listenAddress": f":{api_port}",
                     "exposedAddress": peer_url,
-                    "stunPorts": [free_port()],
-                    "metricsPort": free_port(),
-                    "healthcheckAddress": f":{free_port()}",
                     "logLevel": "info",
                     "logFile": "console",
                     "authSecret": "test-auth-secret",
@@ -128,10 +157,10 @@ def start_server(path: pathlib.Path) -> tuple[str, int]:
     Start a netbird server and wait until its api answers, and return the id of the
     container running it together with the port the api listens on.
 
-    The ports the server binds are picked by asking the kernel for a free one and
-    letting it go again, so another process on the machine can take one in between.
-    That shows up as a container that exits on startup, which is worth another go on
-    a new set of ports rather than a failed test.
+    The port the api is forwarded on is picked by asking the kernel for a free one and
+    letting it go again, so another process on the machine can take it in between.
+    That shows up as a container that exits on startup, which is worth another go on a
+    new port rather than a failed test.
 
     :param path: The directory to write the configuration and the data of the server
         in.  Each attempt gets a subdirectory of its own.
@@ -150,7 +179,7 @@ def start_server(path: pathlib.Path) -> tuple[str, int]:
                 # No --rm: a server that dies on startup would take its logs with it,
                 # and those logs are all wait_until has to report.
                 "--network",
-                "host",
+                pasta_network({api_port: api_port}),
                 # Lets the setup api create the first owner and hand us back a token,
                 # instead of requiring a browser login against the embedded idp.
                 "-e",
@@ -203,9 +232,10 @@ def netbird(tmp_path: pathlib.Path) -> collections.abc.Iterator[requests.Session
       - ``management_url``: the same server, without the ``/api`` suffix, which is
         what the ``netbird::Api`` entity takes.
 
-    Use host networking (and let the server bind the chosen ports directly) rather
-    than published ports: rootless podman can not publish a port to the host loopback
-    when it itself runs inside a container (as it does in CI).
+    The server gets a network namespace of its own with only its api port forwarded to
+    the host, never ``--network host``: it binds a hardcoded ``:33073`` no configuration
+    key moves, so two servers sharing a namespace fight over it and the second one
+    exits.  See ``pasta_network``.
     """
     if shutil.which("podman") is None:
         pytest.skip("podman is required to run the netbird server")

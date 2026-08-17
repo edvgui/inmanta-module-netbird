@@ -140,6 +140,133 @@ index User(api, name)
 implement User using parents
 
 
+entity Group extends JsonObjectABC:
+    """
+    Manage a group of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/groups
+
+    A group is what every access rule of the account is expressed in terms of: it
+    holds peers, and the policies, setup keys, users and dns settings point at it.
+
+    Every fresh account comes with an `All` group holding all of its peers, which the
+    api refuses to rename or to delete.  Managing it with this resource only works as
+    long as the model asks for nothing the api would have to change.
+
+    :attr name: The name of the group, which is what identifies it.  The api rejects
+        a second group with a name it already has.
+    :attr peers: The ids of the peers that are members of the group.  The api reports
+        each of them as an object, but only takes ids on a write: the handler sends
+        back the ids.  An id the account doesn't know is dropped silently.
+    """
+    string name
+    string[]? peers = null
+end
+
+index Group(api, name)
+
+implement Group using parents
+
+
+typedef setup_key_type_t as string matching self in ["one-off", "reusable"]
+
+
+entity SetupKey extends JsonObjectABC:
+    """
+    Manage a setup key of the netbird account, the token a peer registers itself
+    with.
+
+    Api documentation: https://docs.netbird.io/api/resources/setup-keys
+
+    Every attribute but the name is optional, and left null it is not managed: the
+    setup key keeps whatever value the account holds for it.  The api only takes the
+    revocation and the auto groups on an update, so everything else is applied when
+    the key is created and never enforced afterwards.
+
+    The key itself is a secret the api only returns once, on the create, and reports
+    masked from then on.  It is not published as a fact: read it from the api at the
+    moment a peer needs it.
+
+    :attr name: The name of the setup key, which is what identifies it here.  The api
+        allows several keys with the same name, this module does not.
+    :attr type: Whether the key registers a single peer (`one-off`) or as many as the
+        usage limit allows (`reusable`).  Only applied when the key is created.
+    :attr expires_in: How long, in seconds, the key stays valid.  The api reports the
+        moment it expires rather than this duration, so it is only applied when the
+        key is created, and a later change to it is not enforced.
+    :attr revoked: Whether the key is revoked.  A revoked key can not register peers
+        anymore, and the api never un-revokes one.
+    :attr auto_groups: The ids of the groups the peers registered with this key are
+        automatically added to.
+    :attr usage_limit: How many peers may register with this key, zero meaning no
+        limit.  Only applied when the key is created.
+    :attr ephemeral: Whether the peers registered with this key are removed from the
+        account when they stay offline for longer than 10 minutes.  Only applied when
+        the key is created.
+    :attr allow_extra_dns_labels: Whether the peers registered with this key may carry
+        extra dns labels.  Only applied when the key is created.
+    """
+    string name
+    setup_key_type_t? type = null
+    int? expires_in = null
+    bool? revoked = null
+    string[]? auto_groups = null
+    int? usage_limit = null
+    bool? ephemeral = null
+    bool? allow_extra_dns_labels = null
+end
+
+index SetupKey(api, name)
+
+implement SetupKey using parents
+
+
+entity Peer extends JsonObjectABC:
+    """
+    Manage a peer that has joined the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/peers
+
+    A peer can not be created through the api: it comes into existence by registering
+    itself with a setup key or an sso login.  This resource therefore adopts a peer
+    that already joined, keeps the settings the api lets us change in line with the
+    model, and removes the peer from the account when it is purged.  Deploying it for
+    a peer that has not registered yet skips, loudly: there is nothing the handler
+    could do to make that desired state true.
+
+    The peer is identified by its hostname rather than by its name: the name is one of
+    the values this resource manages, and an object can not be found back by a value
+    the model rewrites.  The hostname is what the peer reports about itself when it
+    registers, and the api offers no way to change it, so it is the only stable handle
+    on a peer besides the id the model never knows.
+
+    Every attribute but the hostname is optional, and left null it is not managed: the
+    peer keeps whatever value the account holds for it.
+
+    :attr hostname: The hostname the peer reported when it registered, which is what
+        identifies it.  It is not settable.
+    :attr name: The name of the peer on the account, which its dns label is derived
+        from.  It defaults to the hostname when the peer registers.
+    :attr ssh_enabled: Whether the netbird ssh server runs on the peer.
+    :attr login_expiration_enabled: Whether the peer's login expires and has to be
+        renewed interactively.  The api rejects enabling it on a peer that joined with
+        a setup key rather than with an sso login.
+    :attr inactivity_expiration_enabled: Whether the peer's session expires while it
+        is disconnected.  The api rejects enabling it on a peer that joined with a
+        setup key rather than with an sso login.
+    """
+    string hostname
+    string? name = null
+    bool? ssh_enabled = null
+    bool? login_expiration_enabled = null
+    bool? inactivity_expiration_enabled = null
+end
+
+index Peer(api, hostname)
+
+implement Peer using parents
+
+
 entity Network extends JsonObjectABC:
     """
     Manage a network of the netbird account.
