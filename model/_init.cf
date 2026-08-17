@@ -181,7 +181,8 @@ entity SetupKey extends JsonObjectABC:
     Every attribute but the name is optional, and left null it is not managed: the
     setup key keeps whatever value the account holds for it.  The api only takes the
     revocation and the auto groups on an update, so everything else is applied when
-    the key is created and never enforced afterwards.
+    the key is created and never enforced afterwards.  It does require the type to
+    create a key that doesn't exist yet.
 
     The key itself is a secret the api only returns once, on the create, and reports
     masked from then on.  It is not published as a fact: read it from the api at the
@@ -190,16 +191,21 @@ entity SetupKey extends JsonObjectABC:
     :attr name: The name of the setup key, which is what identifies it here.  The api
         allows several keys with the same name, this module does not.
     :attr type: Whether the key registers a single peer (`one-off`) or as many as the
-        usage limit allows (`reusable`).  Only applied when the key is created.
+        usage limit allows (`reusable`).  Only applied when the key is created, and
+        required to create one.
     :attr expires_in: How long, in seconds, the key stays valid.  The api reports the
         moment it expires rather than this duration, so it is only applied when the
         key is created, and a later change to it is not enforced.
     :attr revoked: Whether the key is revoked.  A revoked key can not register peers
-        anymore, and the api never un-revokes one.
+        anymore, and the api refuses to un-revoke one: asking for that is a failed
+        deploy.  The api only takes the revocation on an update, so a key the model
+        wants revoked from the start is created and then revoked.
     :attr auto_groups: The ids of the groups the peers registered with this key are
-        automatically added to.
+        automatically added to.  The api rejects the account's `All` group here, and
+        an id it doesn't know.
     :attr usage_limit: How many peers may register with this key, zero meaning no
-        limit.  Only applied when the key is created.
+        limit.  Only applied when the key is created, and forced to one for a
+        `one-off` key.
     :attr ephemeral: Whether the peers registered with this key are removed from the
         account when they stay offline for longer than 10 minutes.  Only applied when
         the key is created.

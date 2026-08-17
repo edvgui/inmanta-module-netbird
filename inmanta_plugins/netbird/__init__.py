@@ -492,13 +492,13 @@ def find_setup_key(session: Session, name: str) -> dict | None:
 
 
 # The keys of the setup key object the api takes when a key is created, and the ones
-# it takes when an existing key is updated.  Nearly everything about a key is fixed
-# at creation: only its revocation and its auto groups can be changed afterwards.
+# it takes when an existing key is updated.  Nearly everything about a key is fixed at
+# creation: only its revocation and its auto groups can be changed afterwards, and the
+# revocation is the other way around — the api ignores it on the create.
 SETUP_KEY_CREATE_KEYS = (
     "name",
     "type",
     "expires_in",
-    "revoked",
     "auto_groups",
     "usage_limit",
     "ephemeral",
@@ -524,7 +524,8 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
         return select(body, SETUP_KEY_UPDATE_KEYS)
 
     def normalize(self, body: dict) -> dict:
-        # The api doesn't preserve the order of the auto groups
+        # The api keeps the auto groups in the order it was given them, which carries
+        # no meaning: the same set written in another order is not a change.
         if body.get("auto_groups") is not None:
             body["auto_groups"] = sorted(body["auto_groups"])
 
@@ -563,6 +564,19 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
         self.publish_ids(ctx, id=setup_key["id"])
         ctx.set_created()
 
+        if desired.get("revoked"):
+            # The api ignores the revocation when a key is created, so a key the model
+            # wants revoked from the start needs a second call.  It is built from the
+            # key the api just made, as an update has to carry the auto groups too.
+            process_netbird_response(
+                self.session.put(
+                    url=f"setup-keys/{setup_key['id']}",
+                    json=select(
+                        self.merged_body(setup_key, resource), SETUP_KEY_UPDATE_KEYS
+                    ),
+                ),
+            )
+
     def update_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
@@ -571,7 +585,8 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
     ) -> None:
         # The body calculate_diff merged is the object as the api holds it, with the
         # desired state applied on top.  The api only takes part of it on an update,
-        # and requires both of the values it does take on every call.
+        # and requires the auto groups on every call even when the revocation is what
+        # is being changed.
         process_netbird_response(
             self.session.put(
                 url=f"setup-keys/{ctx.get('ID')}",
