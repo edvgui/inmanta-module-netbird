@@ -98,6 +98,12 @@ Two hooks to override:
   neither is what you are changing — hence the merged body.  `is_blocked` is only taken
   on the `PUT`, so a user the model wants blocked from the start needs a create
   followed by an update.
+- `PUT /api/peers/{id}` **replaces** the keys it takes: one left out of the body is read
+  as its go zero value and written, so `{"name": "x"}` silently resets `ssh_enabled` to
+  false.  It also requires `name` on every call (`500` without).  There is no
+  `POST /api/peers` — a peer registers itself, so `create_resource` raises
+  `SkipResource`.  `approval_required` and `extra_dns_labels` are accepted and silently
+  ignored; don't model a key the api drops, it can never converge.
 - A **service user has no email address**: the api stores `""` whatever you send.  Its
   `name` is the only thing left to identify it, which is why `netbird::User` is indexed
   on the name for regular and service users alike.
@@ -133,6 +139,39 @@ Two hooks to override:
 - The server binds a hardcoded `:33073` for the management grpc, which no config key
   moves.  Two servers sharing a network namespace fight over it and the second one
   exits — hence the namespace per container, see below.
+
+## The readme example is compiled and deployed by a test
+
+`tests/test_example.py` builds the model the readme shows, compiles it, deploys the part
+that is safe to deploy, and writes the result back between the `<x-example-...>` markers
+in `README.md` — same mechanism as `inmanta-module-podman` and `inmanta-module-files`.
+Edit the model in the test, never the readme.  What that exercise turned up:
+
+- `podman::Container` is **not a resource**.  It is rendered into a quadlet unit file by
+  `podman::services::SystemdContainer`, and that file is what deploys, next to the
+  `exec::Run` resources doing `systemctl daemon-reload`/`enable`/`start`.  A model that
+  only declares the container exports nothing, and a `requires` on it silently drops
+  ("had requirements before flattening, but not after").
+- **A reference can not be handed to a plugin declaring `object`.**  `files::jinja` takes
+  `**kwargs: object`, and the dsl refuses a reference there.  Pass the *entity* and build
+  the reference inside the template with the filter form,
+  `{{ setup_key | std.create_fact_reference("key") }}` — the plugins are registered as
+  jinja filters, not as globals, so `std.create_fact_reference(...)` as a call is
+  `'std' is undefined`.
+- **`podman::Container.env` can not carry a reference at all**: the quadlet template
+  concatenates the values at compile time and dies with `can only concatenate str (not
+  "FactReference") to str`.  An environment file whose content is a reference is the way
+  through.
+- Jinja drops the template's trailing newline, so the rendered file has none.
+- `project.deploy_resource("<type>")` takes the **first** resource of that type; pass a
+  filter (`path=...`) when the model holds several.
+- A container that needs `--hostname` also needs **`--uts private`**.  The ci job's
+  podman defaults to the host uts namespace, where `--hostname` is refused outright:
+  `cannot set hostname when running in the host UTS namespace`.  It works without it
+  locally, so this only ever shows up in ci.
+- Never start a container with `check=True` and `capture_output=True` alone: the
+  `CalledProcessError` carries the exit code and throws podman's message away, which is
+  the only thing that explains a failure happening somewhere other than this machine.
 
 ## Testing
 
