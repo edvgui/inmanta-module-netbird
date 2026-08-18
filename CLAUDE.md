@@ -210,10 +210,17 @@ pytest tests
 - The account is set up through `POST /api/setup` with `NB_SETUP_PAT_ENABLED=true`,
   which mints the PAT the tests drive the api with.  No IdP, no dashboard (netbird ≥
   0.62 has built-in local users).
-- **Several copies of the suite can run next to each other on one host**, which is what
-  every container getting a network namespace of its own buys.  Never `--network host`:
-  the servers would collide on `:33073` and the peer clients on their wireguard
-  interface.  Give a new container its `--network` from `pasta_network()`.
+- **Start every container through `run_container(name, args)`.**  It gives the container
+  a fixed name under the `netbird-test` prefix and force-replaces whatever holds that
+  name already.  A run that is killed never reaches the fixtures' `finally`, so it leaks
+  its server; a fixed name means the next run reclaims that leftover instead of leaving
+  it to hold its memory and its sqlite store until someone cleans up by hand.  It also
+  raises with podman's stderr, which a bare returncode does not give you.
+- **One copy of the suite per host**: fixed names mean a second copy takes the first
+  one's containers away.  That is the trade for never leaking a server.  Containers still
+  each get a network namespace of their own — never `--network host`, the servers would
+  collide on `:33073` and the peer clients on their wireguard interface.  Give a new
+  container its `--network` from `pasta_network()`.
 - Forwarding is `pasta:--tcp-ports,<host>:<container>`, **not `--publish`**: podman's own
   port forwarder silently does not forward when rootless podman itself runs inside a
   container, which is exactly the CI setup.  Verified both ways in
