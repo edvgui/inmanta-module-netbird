@@ -140,6 +140,32 @@ Two hooks to override:
   moves.  Two servers sharing a network namespace fight over it and the second one
   exits — hence the namespace per container, see below.
 
+## The readme example is compiled and deployed by a test
+
+`tests/test_example.py` builds the model the readme shows, compiles it, deploys the part
+that is safe to deploy, and writes the result back between the `<x-example-...>` markers
+in `README.md` — same mechanism as `inmanta-module-podman` and `inmanta-module-files`.
+Edit the model in the test, never the readme.  What that exercise turned up:
+
+- `podman::Container` is **not a resource**.  It is rendered into a quadlet unit file by
+  `podman::services::SystemdContainer`, and that file is what deploys, next to the
+  `exec::Run` resources doing `systemctl daemon-reload`/`enable`/`start`.  A model that
+  only declares the container exports nothing, and a `requires` on it silently drops
+  ("had requirements before flattening, but not after").
+- **A reference can not be handed to a plugin declaring `object`.**  `files::jinja` takes
+  `**kwargs: object`, and the dsl refuses a reference there.  Pass the *entity* and build
+  the reference inside the template with the filter form,
+  `{{ setup_key | std.create_fact_reference("key") }}` — the plugins are registered as
+  jinja filters, not as globals, so `std.create_fact_reference(...)` as a call is
+  `'std' is undefined`.
+- **`podman::Container.env` can not carry a reference at all**: the quadlet template
+  concatenates the values at compile time and dies with `can only concatenate str (not
+  "FactReference") to str`.  An environment file whose content is a reference is the way
+  through.
+- Jinja drops the template's trailing newline, so the rendered file has none.
+- `project.deploy_resource("<type>")` takes the **first** resource of that type; pass a
+  filter (`path=...`) when the model holds several.
+
 ## Testing
 
 ```sh
