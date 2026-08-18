@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make mypy-plugins)",
+      "Bash(make pep8)",
+      "Bash(make mypy)",
+      "Bash(flake8 *)",
+      "Bash(podman ps *)",
+      "Bash(podman logs *)",
+      "Bash(podman inspect *)",
+      "Bash(podman --version)"
+    ]
+  }
+}
