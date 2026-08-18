@@ -19,10 +19,12 @@ Contact: edvgui@gmail.com
 import collections.abc
 import json
 
+import inmanta_plugins.std
 import pytest_inmanta.plugin
 import requests
 from conftest import DEFAULT_GROUP, facts, get
 
+import inmanta.plugins
 from inmanta import const
 
 SETUP_KEY_NAME = "peers-of-the-lab"
@@ -86,19 +88,27 @@ def test_setup_key_created_revoked_and_purged(
 
     setup_key = find_setup_key(netbird, SETUP_KEY_NAME)
     assert setup_key is not None
-    # The id the api gave the key is published, already on the deploy that created
-    # it.  The key itself is a secret, and is not published.
-    assert facts(project) == {"id": setup_key["id"]}
+    # The id the api gave the key and the key it generated are both published, already
+    # on the deploy that created them.  The listing reports the key masked, so the fact
+    # is the only place the value a peer can register with is kept.
+    published = facts(project)
+    assert set(published) == {"id", "key"}
+    assert published["id"] == setup_key["id"]
+    assert "*" not in published["key"]
+    assert published["key"].startswith(setup_key["key"].rstrip("*"))
     assert setup_key["type"] == "reusable"
     assert setup_key["usage_limit"] == 3
     assert setup_key["revoked"] is False
     assert setup_key["valid"] is True
 
-    # A second deploy of the same desired state changes nothing.
+    # A second deploy of the same desired state changes nothing.  It goes through the
+    # read, which sees the key masked: republishing it there would replace a usable
+    # key with `ABCDE****`, so the read publishes the id alone.
     compile_model(
         setup_key_model(type="reusable", expires_in=SETUP_KEY_EXPIRY, usage_limit=3)
     )
     project.deploy_resource("netbird::SetupKey", change=const.Change.nochange)
+    assert facts(project) == {"id": setup_key["id"]}
 
     # Revoking is the one change the api takes on an existing key.
     compile_model(setup_key_model(revoked=True))
@@ -266,3 +276,43 @@ def test_the_default_group_is_not_an_auto_group(
     )
     project.deploy_resource("netbird::SetupKey", status=const.ResourceState.failed)
     assert find_setup_key(netbird, SETUP_KEY_NAME) is None
+
+
+def test_key_is_a_fact_reference(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+) -> None:
+    """
+    The generated key is exposed the way the object id is: the model never holds the
+    value, it holds a reference that reads back the fact the handler published, and
+    whoever registers a peer with it resolves that on the agent.
+    """
+    compile_model(setup_key_model(type="reusable", expires_in=SETUP_KEY_EXPIRY))
+
+    (setup_key,) = project.get_instances("netbird::SetupKey")
+    key = inmanta.plugins.allow_reference_values(setup_key)._key
+    assert isinstance(key, inmanta_plugins.std.FactReference)
+    assert key.fact_name == "key"
+
+
+def test_the_key_is_not_sent_back_to_the_api(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+) -> None:
+    """
+    The key is the api's to generate, so it must not end up in the body the handler
+    writes.  Its leading underscore is what keeps it out of the serialized desired
+    state — without it the deploy would also have to resolve the reference before the
+    create that produces the fact has run.
+    """
+    compile_model(setup_key_model(type="reusable", expires_in=SETUP_KEY_EXPIRY))
+
+    resource = project.get_resource("netbird::SetupKey")
+    assert resource is not None
+    serialized = {
+        key
+        for state in resource.desired_state
+        for key in (state["value"] if isinstance(state["value"], dict) else {})
+    }
+    assert "_key" not in serialized
+    assert "key" not in serialized

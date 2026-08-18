@@ -184,10 +184,13 @@ entity SetupKey extends JsonObjectABC:
     the key is created and never enforced afterwards.  It does require the type to
     create a key that doesn't exist yet.
 
-    The key itself is a secret the api only returns once, on the create, and reports
-    masked from then on.  It is not published as a fact: read it from the api at the
-    moment a peer needs it.
-
+    :attr _key: The generated key itself, which a peer registers with.  Like the id,
+        the model never knows it: it is a reference resolving the fact the handler
+        publishes.  The api shows the key in clear in the create response only and
+        reports it masked from then on, so that fact is published on the create and
+        never again — a key this module adopted rather than created has none, and a
+        reference to it can not be resolved.  It carries a leading underscore because
+        the model must not send it back: it is the api that generates it.
     :attr name: The name of the setup key, which is what identifies it here.  The api
         allows several keys with the same name, this module does not.
     :attr type: Whether the key registers a single peer (`one-off`) or as many as the
@@ -220,8 +223,20 @@ entity SetupKey extends JsonObjectABC:
     int? usage_limit = null
     bool? ephemeral = null
     bool? allow_extra_dns_labels = null
+    string _key
 end
 
 index SetupKey(api, name)
 
-implement SetupKey using parents
+
+implementation setup_key_secret for SetupKey:
+    """
+    The key the api generated is only ever shown once, in the response to the call
+    that created it.  The handler publishes it as a fact there, and this reference
+    reads it back on the agent, at the moment whoever registers a peer needs it.
+    """
+    self._key = std::create_fact_reference(self, "key")
+end
+
+
+implement SetupKey using parents, setup_key_secret
