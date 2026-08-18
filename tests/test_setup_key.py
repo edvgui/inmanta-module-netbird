@@ -39,6 +39,17 @@ def group_id(netbird: requests.Session, name: str) -> str:
     return next(g["id"] for g in get(netbird, "groups") if g["name"] == name)
 
 
+def create_group(netbird: requests.Session, name: str) -> str:
+    """
+    Create a group on the account and return its id.  The auto groups of a setup key
+    can not be the group every account comes with: the api rejects it, so the tests
+    make groups of their own to point at.
+    """
+    response = netbird.post(f"{netbird.base_url}/groups", json={"name": name})
+    response.raise_for_status()
+    return response.json()["id"]
+
+
 def setup_key_model(**attributes: object) -> str:
     """
     Build a setup key resource, with only the attributes the test has an opinion
@@ -96,6 +107,12 @@ def test_setup_key_created_revoked_and_purged(
     assert revoked["revoked"] is True
     assert revoked["valid"] is False
 
+    # And it only goes that way: the api refuses to un-revoke a key, so a model asking
+    # for it is a failed deploy rather than something silently ignored.
+    compile_model(setup_key_model(revoked=False))
+    project.deploy_resource("netbird::SetupKey", status=const.ResourceState.failed)
+    assert find_setup_key(netbird, SETUP_KEY_NAME)["revoked"] is True
+
     compile_model(setup_key_model(purged=True))
     project.deploy_resource("netbird::SetupKey")
     assert find_setup_key(netbird, SETUP_KEY_NAME) is None
@@ -109,26 +126,35 @@ def test_setup_key_auto_groups(
     """
     The api identifies the groups the peers registered with a key are added to by id,
     and so does the model: no name is translated on the way in or out, so the same
-    desired state is a no-op on the second deploy.
+    desired state is a no-op on the second deploy.  The api keeps them in the order it
+    was given them, which carries no meaning: the same set in another order is not a
+    change either.
     """
-    all_group = group_id(netbird, DEFAULT_GROUP)
+    groups = [create_group(netbird, "lab"), create_group(netbird, "staging")]
 
     compile_model(
-        setup_key_model(
-            type="one-off", expires_in=SETUP_KEY_EXPIRY, auto_groups=[all_group]
-        )
+        setup_key_model(type="one-off", expires_in=SETUP_KEY_EXPIRY, auto_groups=groups)
     )
     project.deploy_resource("netbird::SetupKey")
-    assert find_setup_key(netbird, SETUP_KEY_NAME)["auto_groups"] == [all_group]
+    assert sorted(find_setup_key(netbird, SETUP_KEY_NAME)["auto_groups"]) == sorted(
+        groups
+    )
 
     compile_model(
         setup_key_model(
-            type="one-off", expires_in=SETUP_KEY_EXPIRY, auto_groups=[all_group]
+            type="one-off",
+            expires_in=SETUP_KEY_EXPIRY,
+            auto_groups=list(reversed(groups)),
         )
     )
     project.deploy_resource("netbird::SetupKey", change=const.Change.nochange)
 
     # The auto groups are the other thing the api takes on an update.
+    compile_model(setup_key_model(auto_groups=[groups[0]]))
+    project.deploy_resource("netbird::SetupKey")
+    assert find_setup_key(netbird, SETUP_KEY_NAME)["auto_groups"] == [groups[0]]
+
+    # An empty collection comes back as one: the api never answers a json null here.
     compile_model(setup_key_model(auto_groups=[]))
     project.deploy_resource("netbird::SetupKey")
     assert find_setup_key(netbird, SETUP_KEY_NAME)["auto_groups"] == []
@@ -175,7 +201,7 @@ def test_attributes_left_null_are_not_managed(
     it, even when it was changed in the dashboard behind our back.  And a value the
     model does set is enforced, dashboard or not.
     """
-    all_group = group_id(netbird, DEFAULT_GROUP)
+    group = create_group(netbird, "lab")
 
     compile_model(setup_key_model(type="one-off", expires_in=SETUP_KEY_EXPIRY))
     project.deploy_resource("netbird::SetupKey")
@@ -183,14 +209,60 @@ def test_attributes_left_null_are_not_managed(
     setup_key = find_setup_key(netbird, SETUP_KEY_NAME)
     netbird.put(
         f"{netbird.base_url}/setup-keys/{setup_key['id']}",
-        json={"revoked": False, "auto_groups": [all_group]},
+        json={"revoked": False, "auto_groups": [group]},
     ).raise_for_status()
 
     # The auto groups aren't managed: the deploy leaves them as they are.
     compile_model(setup_key_model(type="one-off", expires_in=SETUP_KEY_EXPIRY))
     project.deploy_resource("netbird::SetupKey", change=const.Change.nochange)
-    assert find_setup_key(netbird, SETUP_KEY_NAME)["auto_groups"] == [all_group]
+    assert find_setup_key(netbird, SETUP_KEY_NAME)["auto_groups"] == [group]
 
     compile_model(setup_key_model(auto_groups=[]))
     project.deploy_resource("netbird::SetupKey")
     assert find_setup_key(netbird, SETUP_KEY_NAME)["auto_groups"] == []
+
+
+def test_setup_key_revoked_from_the_start(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    The api ignores the revocation when a key is created, so the handler revokes the
+    key it just made: a model asking for a revoked key converges on the first deploy
+    rather than on the next repair.
+    """
+    compile_model(
+        setup_key_model(type="reusable", expires_in=SETUP_KEY_EXPIRY, revoked=True)
+    )
+    project.deploy_resource("netbird::SetupKey")
+
+    setup_key = find_setup_key(netbird, SETUP_KEY_NAME)
+    assert setup_key["revoked"] is True
+    assert setup_key["valid"] is False
+
+    compile_model(
+        setup_key_model(type="reusable", expires_in=SETUP_KEY_EXPIRY, revoked=True)
+    )
+    project.deploy_resource("netbird::SetupKey", change=const.Change.nochange)
+
+
+def test_the_default_group_is_not_an_auto_group(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    The api refuses the group every account comes with as an auto group of a setup key.
+    That refusal is reported as a failed deploy rather than silently ignored: the model
+    asked for something the account can not do.
+    """
+    compile_model(
+        setup_key_model(
+            type="reusable",
+            expires_in=SETUP_KEY_EXPIRY,
+            auto_groups=[group_id(netbird, DEFAULT_GROUP)],
+        )
+    )
+    project.deploy_resource("netbird::SetupKey", status=const.ResourceState.failed)
+    assert find_setup_key(netbird, SETUP_KEY_NAME) is None

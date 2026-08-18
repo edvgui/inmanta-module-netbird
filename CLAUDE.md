@@ -37,6 +37,13 @@ the keys the api reports about itself.
 - A relation **between two json objects must be one-way** (`A.b [1] -- B`, not
   `-- B.as [0:]`).  A two-way one makes `get_child_instances` treat each end as a child
   of the other, and the serializer recurses forever.
+- An **embedded** entity (a list of objects inside one api object, which the dsl has no
+  attribute type for) is the exception: it must be two-way and the relation back to its
+  parent must be named `parent`, which is the one name `get_child_instances` skips —
+  that is what stops the recursion, and `get_relative_path` refuses a one-way one.
+  Give it an `index (parent, <key>)`: the desired state then addresses each entry by
+  that key, so the entries the model doesn't name are kept, and the order of the list
+  can not be expressed by the model at all (the paths are applied sorted).
 
 ## Ids are ids, never names
 
@@ -127,7 +134,65 @@ Two hooks to override:
   only take a list of peer ids and answer 400 on the shape the api returned itself.  An
   empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
   account doesn't know is dropped silently.  `PUT /api/groups/{id}` replaces the whole
-  group: a key left out of it is emptied.
+  group: a key left out of it is emptied.  Its `resources` go the other way round than
+  its `peers`: reported as `{id, type}` objects and only taken that way, 400 on a list of
+  ids.
+- `POST /api/setup-keys` requires `name` and `type`, takes everything else optionally,
+  and **silently ignores `revoked`** (and any key it doesn't know) — a key the model
+  wants revoked has to be created and then updated.  `type: one-off` forces
+  `usage_limit` to 1 whatever you send.  Duplicate names are allowed.
+- `PUT /api/setup-keys/{id}` requires `auto_groups` on every call (422 "setup key
+  autogroups field is invalid" without it) and takes `revoked` optionally; every other
+  key of the body, `name` included, is ignored, so echoing back the whole read body is
+  harmless.  Un-revoking is a 422: revocation only goes one way.
+- The api never echoes `expires_in` back, it reports the `expires` timestamp — hence
+  create-only and out of `diff_body`.  `key` is in clear in the create response and
+  masked (`ABCDE****`) on every read.
+- A setup key's `auto_groups` come back in the order they were sent, and as `[]` when
+  empty (no json `null` here).  The account's `All` group is refused (422 "can't add
+  'all' group to the setup key"), and so is an unknown group id — unlike a group's
+  `peers`, which drop silently.
+- `POST /api/networks` requires nothing at all — an empty body makes a nameless network —
+  and the api takes several networks with the same name.  `PUT` replaces both keys.
+- Deleting a network takes the resources and the routers it holds with it, no ordering
+  needed.  The other way round matters: creating either in a network that is gone answers
+  404, while listing them answers `null` / `[]`, so a child of a network that no longer
+  exists reads as purged rather than failing.
+- `POST`/`PUT /api/networks/{id}/resources` **require `address`** and answer `500` without
+  one, or on an address they can't parse.  `type` is derived from the address and a `type`
+  in the body is ignored.  `PUT` replaces: `name`, `description`, `enabled` and `groups`
+  left out are emptied.  A resource name is unique within a network (422 on a duplicate).
+  `groups` are reported as objects and only taken as ids (400 on the object shape), and
+  the empty resource listing is json `null` while the empty router listing is `[]`.
+- `POST`/`PUT /api/networks/{id}/routers` take exactly one of `peer` and `peer_groups`:
+  400 `either peer or peer_groups must be provided` with neither, 400 `peer and
+  peer_groups cannot be set at the same time` with both, on the update as much as on the
+  create.  An *empty* one next to a filled one is fine, which is what lets the merged body
+  through: the api reports `peer: ""` for a group router and `peer_groups: null` for a
+  peer router.  `PUT` replaces, so an omitted `metric` becomes `0` and an omitted
+  `masquerade`/`enabled` becomes `false`.  Several routers may route for the same target,
+  and a peer or group id the account doesn't know is accepted silently, so nothing but the
+  target identifies a router.
+- `POST`/`PUT /api/dns/nameservers` take the same keys and validate the whole group on
+  every call: **one to three** nameservers, at least one distribution group, and either
+  `primary` or a non-empty `domains`, never both and never neither, and it refuses a
+  primary group with `search_domains_enabled` rather than dropping it.  The count error
+  reads "the list of nameservers should be 1 or 3" but two are accepted — only 0 and
+  more than 3 are refused.  Every nameserver needs `ip`, `ns_type` (`udp` is the only
+  value) **and** `port` — one missing either is "invalid ns servers format", so the
+  handler completes an entry the model only named with `udp`/`53`.
+- `PUT /api/dns/nameservers/{id}` **replaces**: a key left out is written as its zero
+  value, and an emptied `domains` comes back as json `null`.  `enabled` is not defaulted
+  to true on a create either: a group the model says nothing about is created disabled.
+- The api keeps `nameservers`, `groups`, `domains` and `disabled_management_groups` in
+  the order it was given them.  The handler still sorts everything but the nameservers:
+  those are sets of ids and domains, while the nameserver order is simply not managed.
+- `PUT /api/dns/settings` answers with the settings, and requires
+  `disabled_management_groups`: without the key it answers `404 account not found`.
+  There is no `POST` and no `DELETE` on it (`404 page not found`) — the settings are
+  part of the account, so purging `netbird::DnsSettings` fails the deploy.
+- Two primary nameserver groups on one account are accepted, the api enforces nothing
+  there.
 - `POST /api/dns/zones` requires a `name`, a well formed `domain` and at least one
   distribution group; a second zone on a domain the account serves is a 409, and
   changing the domain of an existing zone a 422 (`zone domain cannot be updated`).  A

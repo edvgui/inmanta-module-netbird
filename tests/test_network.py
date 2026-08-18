@@ -22,11 +22,13 @@ import json
 import pytest_inmanta.plugin
 import requests
 from conftest import DEFAULT_GROUP, facts, get
+from test_peer import peer  # noqa: F401
 
 from inmanta import const
 
 NETWORK_NAME = "office"
 RESOURCE_NAME = "printer"
+RESOURCE_ADDRESS = "10.0.0.1"
 ROUTER_NAME = "gateway"
 
 Compile = collections.abc.Callable[[str], None]
@@ -70,10 +72,13 @@ def network_model(**attrs: object) -> str:
     )
 
 
-def resource_model(**attrs: object) -> str:
+def resource_model(address: str = RESOURCE_ADDRESS, **attrs: object) -> str:
     """
     Build a network resource of the network the model declares, addressed under the id
     the network published as a fact.
+
+    The address is the one value that is not optional: the api refuses to store a
+    resource without one.
     """
     return "\n".join(
         [
@@ -81,6 +86,7 @@ def resource_model(**attrs: object) -> str:
             "    api=api,",
             "    _network=network.id,",
             f"    name={json.dumps(RESOURCE_NAME)},",
+            f"    address={json.dumps(address)},",
             *attributes(**attrs),
             ")",
         ]
@@ -172,12 +178,12 @@ def test_network_resource_created_updated_and_purged(
     all_group = group_id(netbird, DEFAULT_GROUP)
 
     def resources() -> list[dict]:
-        return get(netbird, f"networks/{identifier}/resources")
+        # A network holding no resource at all reports a json null rather than an empty
+        # list.
+        return get(netbird, f"networks/{identifier}/resources") or []
 
     compile_model(
-        network_model()
-        + "\n"
-        + resource_model(address="10.0.0.1", enabled=True, groups=[all_group])
+        network_model() + "\n" + resource_model(enabled=True, groups=[all_group])
     )
     project.deploy_resource("netbird::NetworkResource")
 
@@ -186,14 +192,17 @@ def test_network_resource_created_updated_and_purged(
     assert resource["name"] == RESOURCE_NAME
     # The api stores a host address as the network it is alone in
     assert resource["address"] == "10.0.0.1/32"
+    # And it derives the type of the resource from the address: the model never sets it.
     assert resource["type"] == "host"
     assert resource["enabled"] is True
     assert [group["id"] for group in resource["groups"]] == [all_group]
 
+    # The resources the api reports on the network are computed from the objects that
+    # point at it: the network holding one now is no change to the network itself.
+    project.deploy_resource("netbird::Network", change=const.Change.nochange)
+
     compile_model(
-        network_model()
-        + "\n"
-        + resource_model(address="10.0.0.1", enabled=True, groups=[all_group])
+        network_model() + "\n" + resource_model(enabled=True, groups=[all_group])
     )
     project.deploy_resource("netbird::NetworkResource", change=const.Change.nochange)
 
@@ -203,12 +212,13 @@ def test_network_resource_created_updated_and_purged(
     compile_model(
         network_model()
         + "\n"
-        + resource_model(address="10.0.0.0/24", description="The office subnet")
+        + resource_model("10.0.0.0/24", description="The office subnet")
     )
     project.deploy_resource("netbird::NetworkResource")
 
     (resource,) = resources()
     assert resource["address"] == "10.0.0.0/24"
+    # The type follows the address, without the model ever mentioning it.
     assert resource["type"] == "subnet"
     assert resource["description"] == "The office subnet"
     assert [group["id"] for group in resource["groups"]] == [all_group]
@@ -233,7 +243,7 @@ def test_network_router_created_updated_and_purged(
     all_group = group_id(netbird, DEFAULT_GROUP)
 
     def routers() -> list[dict]:
-        return get(netbird, f"networks/{identifier}/routers")
+        return get(netbird, f"networks/{identifier}/routers") or []
 
     compile_model(
         network_model()
@@ -271,5 +281,73 @@ def test_network_router_created_updated_and_purged(
     compile_model(
         network_model() + "\n" + router_model(peer_groups=[all_group], purged=True)
     )
+    project.deploy_resource("netbird::NetworkRouter")
+    assert routers() == []
+
+
+def test_network_router_for_a_peer(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+    peer: dict,  # noqa: F811
+) -> None:
+    """
+    A router routes either for one peer or for the peers of a set of groups, and the api
+    takes exactly one of the two: it refuses a router with neither and a router with
+    both.  A router pointing at a peer carries its id, which the model never knows
+    itself: the peer resource publishes it as a fact.
+
+    The peer is a real netbird client, registered by the fixture this module imports from
+    the peer tests: a peer can not be created through the api.
+    """
+    identifier = deploy_network(project, compile_model, netbird)
+    all_group = group_id(netbird, DEFAULT_GROUP)
+
+    def routers() -> list[dict]:
+        return get(netbird, f"networks/{identifier}/routers") or []
+
+    compile_model(
+        network_model()
+        + "\n"
+        + router_model(peer=peer["id"], metric=100, masquerade=True)
+    )
+    project.deploy_resource("netbird::NetworkRouter")
+
+    (router,) = routers()
+    assert facts(project) == {"id": router["id"]}
+    assert router["peer"] == peer["id"]
+    # The api reports the half of the pair the router doesn't use as an empty value
+    assert router["peer_groups"] is None
+    assert router["metric"] == 100
+    assert router["enabled"] is True
+
+    compile_model(
+        network_model()
+        + "\n"
+        + router_model(peer=peer["id"], metric=100, masquerade=True)
+    )
+    project.deploy_resource("netbird::NetworkRouter", change=const.Change.nochange)
+
+    # The peer the router routes for is not what is being changed here, and the api
+    # requires it on every update all the same: the merged body carries it along.
+    compile_model(network_model() + "\n" + router_model(peer=peer["id"], metric=50))
+    project.deploy_resource("netbird::NetworkRouter")
+
+    (router,) = routers()
+    assert router["peer"] == peer["id"]
+    assert router["metric"] == 50
+    assert router["masquerade"] is True
+
+    # A router routing for a peer and for groups at once is not something the api
+    # stores, and neither is one routing for nothing at all.
+    compile_model(
+        network_model() + "\n" + router_model(peer=peer["id"], peer_groups=[all_group])
+    )
+    project.deploy_resource("netbird::NetworkRouter", status=const.ResourceState.failed)
+
+    compile_model(network_model() + "\n" + router_model(metric=10))
+    project.deploy_resource("netbird::NetworkRouter", status=const.ResourceState.failed)
+
+    compile_model(network_model() + "\n" + router_model(peer=peer["id"], purged=True))
     project.deploy_resource("netbird::NetworkRouter")
     assert routers() == []
