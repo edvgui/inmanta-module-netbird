@@ -46,6 +46,46 @@ DEFAULT_GROUP = "All"
 # usually all it takes.
 SERVER_START_ATTEMPTS = 3
 
+# Every container these tests start carries a fixed name under this prefix.  A run that
+# is interrupted leaves its containers behind — the fixtures tear them down in a finally
+# block, which a killed process never reaches — and a fixed name means the next run
+# finds that leftover and replaces it instead of piling a new container next to it.  The
+# prefix keeps ``run_container`` away from anything on the machine that is not ours.
+CONTAINER_PREFIX = "netbird-test"
+SERVER_CONTAINER = f"{CONTAINER_PREFIX}-server"
+
+
+def run_container(name: str, args: collections.abc.Sequence[str]) -> str:
+    """
+    Start a detached container under a fixed name, replacing whatever holds that name
+    already, and return its id.
+
+    Only one container of a given name runs at a time, so **two copies of the suite can
+    no longer run next to each other**: the second one takes the first one's containers
+    away.  That is the trade for never leaving a server behind, which is worth it — a
+    leaked server holds its memory and its sqlite store until the machine is cleaned up
+    by hand.
+
+    :param name: The name to give the container, which is also the name of any leftover
+        to replace.
+    :param args: The arguments to ``podman run``, image included.
+    """
+    subprocess.run(["podman", "rm", "-f", name], capture_output=True)
+
+    started = subprocess.run(
+        ["podman", "run", "-d", "--name", name, *args],
+        capture_output=True,
+        text=True,
+    )
+    if started.returncode != 0:
+        # Say what podman said: a bare returncode is nothing to go on when this fails
+        # somewhere other than the machine the test was written on.
+        raise RuntimeError(
+            f"podman run {name} failed ({started.returncode}): {started.stderr.strip()}"
+        )
+
+    return started.stdout.strip()
+
 
 def free_port() -> int:
     """
@@ -171,13 +211,11 @@ def start_server(path: pathlib.Path) -> tuple[str, int]:
         api_port = free_port()
         config = server_config(api_port=api_port, path=root)
 
-        container_id = subprocess.run(
+        # No --rm: a server that dies on startup would take its logs with it, and those
+        # logs are all wait_until has to report.
+        container_id = run_container(
+            SERVER_CONTAINER,
             [
-                "podman",
-                "run",
-                "-d",
-                # No --rm: a server that dies on startup would take its logs with it,
-                # and those logs are all wait_until has to report.
                 "--network",
                 pasta_network({api_port: api_port}),
                 # Lets the setup api create the first owner and hand us back a token,
@@ -192,10 +230,7 @@ def start_server(path: pathlib.Path) -> tuple[str, int]:
                 "--config",
                 "/etc/netbird/config.yaml",
             ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        )
 
         try:
             # The api answers 401 without a token, which is enough to know it is up.

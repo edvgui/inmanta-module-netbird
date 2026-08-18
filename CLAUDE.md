@@ -117,7 +117,9 @@ Two hooks to override:
   only take a list of peer ids and answer 400 on the shape the api returned itself.  An
   empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
   account doesn't know is dropped silently.  `PUT /api/groups/{id}` replaces the whole
-  group: a key left out of it is emptied.
+  group: a key left out of it is emptied.  Its `resources` go the other way round than
+  its `peers`: reported as `{id, type}` objects and only taken that way, 400 on a list of
+  ids.
 - `POST /api/setup-keys` requires `name` and `type`, takes everything else optionally,
   and **silently ignores `revoked`** (and any key it doesn't know) — a key the model
   wants revoked has to be created and then updated.  `type: one-off` forces
@@ -136,6 +138,27 @@ Two hooks to override:
   empty (no json `null` here).  The account's `All` group is refused (422 "can't add
   'all' group to the setup key"), and so is an unknown group id — unlike a group's
   `peers`, which drop silently.
+- `POST /api/networks` requires nothing at all — an empty body makes a nameless network —
+  and the api takes several networks with the same name.  `PUT` replaces both keys.
+- Deleting a network takes the resources and the routers it holds with it, no ordering
+  needed.  The other way round matters: creating either in a network that is gone answers
+  404, while listing them answers `null` / `[]`, so a child of a network that no longer
+  exists reads as purged rather than failing.
+- `POST`/`PUT /api/networks/{id}/resources` **require `address`** and answer `500` without
+  one, or on an address they can't parse.  `type` is derived from the address and a `type`
+  in the body is ignored.  `PUT` replaces: `name`, `description`, `enabled` and `groups`
+  left out are emptied.  A resource name is unique within a network (422 on a duplicate).
+  `groups` are reported as objects and only taken as ids (400 on the object shape), and
+  the empty resource listing is json `null` while the empty router listing is `[]`.
+- `POST`/`PUT /api/networks/{id}/routers` take exactly one of `peer` and `peer_groups`:
+  400 `either peer or peer_groups must be provided` with neither, 400 `peer and
+  peer_groups cannot be set at the same time` with both, on the update as much as on the
+  create.  An *empty* one next to a filled one is fine, which is what lets the merged body
+  through: the api reports `peer: ""` for a group router and `peer_groups: null` for a
+  peer router.  `PUT` replaces, so an omitted `metric` becomes `0` and an omitted
+  `masquerade`/`enabled` becomes `false`.  Several routers may route for the same target,
+  and a peer or group id the account doesn't know is accepted silently, so nothing but the
+  target identifies a router.
 - The server binds a hardcoded `:33073` for the management grpc, which no config key
   moves.  Two servers sharing a network namespace fight over it and the second one
   exits — hence the namespace per container, see below.
@@ -187,10 +210,17 @@ pytest tests
 - The account is set up through `POST /api/setup` with `NB_SETUP_PAT_ENABLED=true`,
   which mints the PAT the tests drive the api with.  No IdP, no dashboard (netbird ≥
   0.62 has built-in local users).
-- **Several copies of the suite can run next to each other on one host**, which is what
-  every container getting a network namespace of its own buys.  Never `--network host`:
-  the servers would collide on `:33073` and the peer clients on their wireguard
-  interface.  Give a new container its `--network` from `pasta_network()`.
+- **Start every container through `run_container(name, args)`.**  It gives the container
+  a fixed name under the `netbird-test` prefix and force-replaces whatever holds that
+  name already.  A run that is killed never reaches the fixtures' `finally`, so it leaks
+  its server; a fixed name means the next run reclaims that leftover instead of leaving
+  it to hold its memory and its sqlite store until someone cleans up by hand.  It also
+  raises with podman's stderr, which a bare returncode does not give you.
+- **One copy of the suite per host**: fixed names mean a second copy takes the first
+  one's containers away.  That is the trade for never leaking a server.  Containers still
+  each get a network namespace of their own — never `--network host`, the servers would
+  collide on `:33073` and the peer clients on their wireguard interface.  Give a new
+  container its `--network` from `pasta_network()`.
 - Forwarding is `pasta:--tcp-ports,<host>:<container>`, **not `--publish`**: podman's own
   port forwarder silently does not forward when rootless podman itself runs inside a
   container, which is exactly the CI setup.  Verified both ways in

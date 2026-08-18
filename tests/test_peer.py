@@ -24,7 +24,14 @@ import inmanta_plugins.std
 import pytest
 import pytest_inmanta.plugin
 import requests
-from conftest import facts, get, pasta_network, wait_until
+from conftest import (
+    CONTAINER_PREFIX,
+    facts,
+    get,
+    pasta_network,
+    run_container,
+    wait_until,
+)
 
 import inmanta.plugins
 from inmanta import const
@@ -64,14 +71,11 @@ def peer(netbird: requests.Session) -> collections.abc.Iterator[dict]:
     )
     key.raise_for_status()
 
-    container_id = subprocess.run(
+    container_id = run_container(
+        f"{CONTAINER_PREFIX}-peer",
         [
-            "podman",
-            "run",
-            "-d",
-            # A network namespace of its own, so that two clients started by two
-            # copies of the suite do not fight over the same wireguard interface, plus
-            # what it takes to set that interface up.
+            # A network namespace of its own, so that the client does not fight over the
+            # host's wireguard interface, plus what it takes to set that interface up.
             "--network",
             pasta_network({}),
             "--cap-add",
@@ -85,10 +89,7 @@ def peer(netbird: requests.Session) -> collections.abc.Iterator[dict]:
             + netbird.management_url.replace("127.0.0.1", PEER_HOST),
             NETBIRD_CLIENT_IMAGE,
         ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    )
 
     try:
         wait_until(

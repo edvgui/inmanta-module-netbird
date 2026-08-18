@@ -26,7 +26,7 @@ import inmanta_plugins.files
 import pytest
 import pytest_inmanta.plugin
 import requests
-from conftest import facts, pasta_network, wait_until
+from conftest import CONTAINER_PREFIX, facts, pasta_network, run_container, wait_until
 from test_peer import (
     NETBIRD_CLIENT_IMAGE,
     PEER_HOST,
@@ -95,11 +95,9 @@ def netbird_client(
     container's own network namespace is not the one the handler uses from the host, and
     an explicit ``-e`` wins over ``--env-file``.
     """
-    started = subprocess.run(
+    container_id = run_container(
+        f"{CONTAINER_PREFIX}-client-{hostname}",
         [
-            "podman",
-            "run",
-            "-d",
             # A namespace of its own, plus what it takes to set up the wireguard
             # interface: the same reasons as every other container in this suite.
             "--network",
@@ -122,17 +120,7 @@ def netbird_client(
             + netbird.management_url.replace("127.0.0.1", PEER_HOST),
             NETBIRD_CLIENT_IMAGE,
         ],
-        capture_output=True,
-        text=True,
     )
-    if started.returncode != 0:
-        # Say what podman said: a bare CalledProcessError only reports the exit code,
-        # which is nothing to go on when this fails somewhere other than this machine.
-        raise RuntimeError(
-            f"podman run failed ({started.returncode}): {started.stderr.strip()}"
-        )
-
-    container_id = started.stdout.strip()
     try:
         wait_until(
             lambda: find_peer(netbird, hostname) is not None,
