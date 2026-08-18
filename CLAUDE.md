@@ -215,6 +215,13 @@ Edit the model in the test, never the readme.  What that exercise turned up:
 - Jinja drops the template's trailing newline, so the rendered file has none.
 - `project.deploy_resource("<type>")` takes the **first** resource of that type; pass a
   filter (`path=...`) when the model holds several.
+- A container that needs `--hostname` also needs **`--uts private`**.  The ci job's
+  podman defaults to the host uts namespace, where `--hostname` is refused outright:
+  `cannot set hostname when running in the host UTS namespace`.  It works without it
+  locally, so this only ever shows up in ci.
+- Never start a container with `check=True` and `capture_output=True` alone: the
+  `CalledProcessError` carries the exit code and throws podman's message away, which is
+  the only thing that explains a failure happening somewhere other than this machine.
 
 ## Testing
 
