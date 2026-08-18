@@ -493,13 +493,13 @@ def find_setup_key(session: Session, name: str) -> dict | None:
 
 
 # The keys of the setup key object the api takes when a key is created, and the ones
-# it takes when an existing key is updated.  Nearly everything about a key is fixed
-# at creation: only its revocation and its auto groups can be changed afterwards.
+# it takes when an existing key is updated.  Nearly everything about a key is fixed at
+# creation: only its revocation and its auto groups can be changed afterwards, and the
+# revocation is the other way around — the api ignores it on the create.
 SETUP_KEY_CREATE_KEYS = (
     "name",
     "type",
     "expires_in",
-    "revoked",
     "auto_groups",
     "usage_limit",
     "ephemeral",
@@ -525,7 +525,8 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
         return select(body, SETUP_KEY_UPDATE_KEYS)
 
     def normalize(self, body: dict) -> dict:
-        # The api doesn't preserve the order of the auto groups
+        # The api keeps the auto groups in the order it was given them, which carries
+        # no meaning: the same set written in another order is not a change.
         if body.get("auto_groups") is not None:
             body["auto_groups"] = sorted(body["auto_groups"])
 
@@ -564,6 +565,19 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
         self.publish_ids(ctx, id=setup_key["id"])
         ctx.set_created()
 
+        if desired.get("revoked"):
+            # The api ignores the revocation when a key is created, so a key the model
+            # wants revoked from the start needs a second call.  It is built from the
+            # key the api just made, as an update has to carry the auto groups too.
+            process_netbird_response(
+                self.session.put(
+                    url=f"setup-keys/{setup_key['id']}",
+                    json=select(
+                        self.merged_body(setup_key, resource), SETUP_KEY_UPDATE_KEYS
+                    ),
+                ),
+            )
+
     def update_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
@@ -572,7 +586,8 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
     ) -> None:
         # The body calculate_diff merged is the object as the api holds it, with the
         # desired state applied on top.  The api only takes part of it on an update,
-        # and requires both of the values it does take on every call.
+        # and requires the auto groups on every call even when the revocation is what
+        # is being changed.
         process_netbird_response(
             self.session.put(
                 url=f"setup-keys/{ctx.get('ID')}",
@@ -698,7 +713,8 @@ class PeerHandler(HandlerABC[PeerResource]):
 # The keys of the network object the api takes, on a create as well as on an update.
 # Everything else it reports about a network (the routers, the resources and the
 # policies it holds) is computed from the objects that point at it, and can not be set
-# here.
+# here.  The update replaces both of them: one left out of the body is emptied, so the
+# merged body is what keeps the value the model has no opinion about.
 NETWORK_KEYS = ("name", "description")
 
 
@@ -775,7 +791,10 @@ class NetworkHandler(HandlerABC[Network]):
 
 
 # The keys of a network resource the api takes, on a create as well as on an update.
-# The type of the resource is not one of them: the api derives it from the address.
+# The type of the resource is not one of them: the api derives it from the address, and
+# ignores a type the body carries.  Both endpoints insist on the address and answer 500
+# without one, and the update replaces every other key: one left out of the body is
+# emptied, so the merged body is what keeps the values the model has no opinion about.
 NETWORK_RESOURCE_KEYS = ("name", "description", "address", "enabled", "groups")
 
 
@@ -815,9 +834,10 @@ class NetworkResourceHandler(HandlerABC[NetworkResource]):
             else:
                 body["address"] = f"{address}/{prefix_length}"
 
-        # The api reports the groups of a resource as objects while it takes them as
-        # ids, it doesn't preserve their order, and it reports a resource that is in no
-        # group at all with no list rather than an empty one.
+        # The api reports the groups of a resource as objects while it only takes them
+        # as ids, and answers 400 on the shape it returned itself.  It doesn't preserve
+        # their order, and reports a resource that is in no group at all with a json
+        # null rather than an empty list.
         if "groups" in body:
             body["groups"] = sorted(
                 group["id"] if isinstance(group, dict) else group
@@ -886,7 +906,12 @@ class NetworkResourceHandler(HandlerABC[NetworkResource]):
         ctx.set_purged()
 
 
-# The keys of a network router the api takes, on a create as well as on an update.
+# The keys of a network router the api takes, on a create as well as on an update.  The
+# update replaces every one of them: one left out of the body is written as its zero
+# value, so a body only carrying the metric silently disables the router.  Exactly one of
+# the two target keys has to hold something, on both endpoints, but an empty one next to
+# a filled one is fine: the merged body carrying `peer: ""` alongside `peer_groups` is
+# what the api itself reports for a router routing for groups.
 NETWORK_ROUTER_KEYS = ("peer", "peer_groups", "metric", "masquerade", "enabled")
 
 
@@ -894,6 +919,10 @@ def routing_target(body: dict) -> tuple[str | None, list[str]]:
     """
     The peer, or the peer groups, a router routes for.  The api gives a router no name
     of its own, this is the only thing it is known by.
+
+    The unused half of the pair is reported as an empty value rather than left out: a
+    router routing for groups carries `peer: ""`, one routing for a peer carries
+    `peer_groups: null`.
 
     :param body: A router, as the api holds it or as the model wants it.
     """
@@ -925,12 +954,15 @@ class NetworkRouter(ResourceABC):
 @inmanta.agent.handler.provider("netbird::NetworkRouter", "")
 class NetworkRouterHandler(HandlerABC[NetworkRouter]):
     def diff_body(self, body: dict) -> dict:
+        # Everything the api reports about a router but its id is settable, so this only
+        # keeps that id out of the diff.
         return select(body, NETWORK_ROUTER_KEYS)
 
     def normalize(self, body: dict) -> dict:
-        # The api doesn't preserve the order of the peer groups
-        if body.get("peer_groups") is not None:
-            body["peer_groups"] = sorted(body["peer_groups"])
+        # The api doesn't preserve the order of the peer groups, and reports a router
+        # that routes for a single peer with a json null rather than an empty list.
+        if "peer_groups" in body:
+            body["peer_groups"] = sorted(body["peer_groups"] or [])
 
         return body
 
