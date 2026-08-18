@@ -543,6 +543,9 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", setup_key["id"])
+        # Only the id is published here.  The api reports the key masked
+        # (``ABCDE****``) on every read, and publishing that would overwrite the fact
+        # the create left behind with a value nothing can register a peer with.
         self.publish_ids(ctx, id=setup_key["id"])
 
         resource.body = self.normalize(setup_key)
@@ -560,10 +563,13 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
             ),
             expected_type=dict,
         )
-        # This response is the only place the api ever shows the generated key in
-        # clear, it is masked everywhere else.  It is a secret, and this module only
-        # ever publishes ids: whoever needs the key reads it from the api itself.
         self.publish_ids(ctx, id=setup_key["id"])
+        # This response is the only place the api ever shows the generated key in
+        # clear, it is masked everywhere else.  So it is published here and nowhere
+        # else, which is what ``netbird::SetupKey._key`` resolves.  The fact does not
+        # expire: there is no second call that could produce the value again, and a
+        # key this module adopted rather than created never gets one.
+        ctx.set_fact("key", setup_key["key"], expires=False)
         ctx.set_created()
 
         if desired.get("revoked"):
