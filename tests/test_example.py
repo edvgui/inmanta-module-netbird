@@ -108,6 +108,11 @@ def netbird_client(
             "NET_ADMIN",
             "--device",
             "/dev/net/tun",
+            # A uts namespace of its own, which is what makes the hostname settable:
+            # podman refuses --hostname in the host uts namespace, and that is the
+            # default in the container the ci job runs in.
+            "--uts",
+            "private",
             "--hostname",
             hostname,
             "--env-file",
