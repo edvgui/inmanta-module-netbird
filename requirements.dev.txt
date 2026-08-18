@@ -1,2 +1,3 @@
 inmanta-dev-dependencies[module]==2.207.0
 pytest-inmanta>=2
+inmanta-module-podman==1.13.1
