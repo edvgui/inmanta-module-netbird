@@ -17,6 +17,22 @@ resource of this module builds upon:
 
 And the following resources:
 1. `netbird::User`: a user, or a service user, of the netbird account.
+2. `netbird::Group`: a group of peers, which the policies, setup keys, users and dns
+   objects of the account point at.
+3. `netbird::SetupKey`: the token a peer registers itself with.
+4. `netbird::Peer`: a peer that has joined the account.  A peer can not be created
+   through the api, it registers itself: this resource adopts one that joined.
+5. `netbird::Network`: a network of the account.
+6. `netbird::NetworkResource`: an address, a subnet or a domain a network gives access
+   to.
+7. `netbird::NetworkRouter`: the peer, or the peers of the groups, routing the traffic
+   towards the resources of a network.
+8. `netbird::NameserverGroup`: a set of dns servers, and the peers that resolve their
+   queries with them.
+9. `netbird::DnsSettings`: the account-level dns settings.  They are part of the
+   account, so this resource only ever updates them.
+10. `netbird::DnsZone`: a dns zone the account serves.
+11. `netbird::DnsZoneRecord`: a record held by one of those zones.
 
 Every netbird object is co-managed with whoever else edits the account: an attribute
 left `null` in the model keeps the value the api currently holds, only the values the
