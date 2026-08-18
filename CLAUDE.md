@@ -28,6 +28,9 @@ the keys the api reports about itself.
   api.  **Anything you declare on `ResourceABC` is invisible to the api; anything on
   `JsonObjectABC` or below is sent.**  A model-only value on an object entity must
   therefore be named `_private` (`get_instance_attributes` skips leading underscores).
+  That also applies to a value the api *generates*: `netbird::SetupKey._key` is a fact
+  reference, and an unprefixed one would be serialized into the desired state, where
+  the agent would have to resolve it before the create that publishes the fact ran.
 - The default `_operation` is `files::merge`, under which `serialize` drops null
   attributes.  That is the mechanism behind "null is not managed" — don't set
   `operation` on these entities.
@@ -109,6 +112,24 @@ Two hooks to override:
   empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
   account doesn't know is dropped silently.  `PUT /api/groups/{id}` replaces the whole
   group: a key left out of it is emptied.
+- `POST /api/setup-keys` requires `name` and `type`, takes everything else optionally,
+  and **silently ignores `revoked`** (and any key it doesn't know) — a key the model
+  wants revoked has to be created and then updated.  `type: one-off` forces
+  `usage_limit` to 1 whatever you send.  Duplicate names are allowed.
+- `PUT /api/setup-keys/{id}` requires `auto_groups` on every call (422 "setup key
+  autogroups field is invalid" without it) and takes `revoked` optionally; every other
+  key of the body, `name` included, is ignored, so echoing back the whole read body is
+  harmless.  Un-revoking is a 422: revocation only goes one way.
+- The api never echoes `expires_in` back, it reports the `expires` timestamp — hence
+  create-only and out of `diff_body`.  `key` is in clear in the create response and
+  masked (`ABCDE****`) on every read, so its fact is published on the create path
+  **only**: the read would clobber it with the mask.  That is the one exception to
+  "publish the fact on both paths", and it means a key this module adopted rather than
+  created has no `key` fact at all.
+- A setup key's `auto_groups` come back in the order they were sent, and as `[]` when
+  empty (no json `null` here).  The account's `All` group is refused (422 "can't add
+  'all' group to the setup key"), and so is an unknown group id — unlike a group's
+  `peers`, which drop silently.
 - The server binds a hardcoded `:33073` for the management grpc, which no config key
   moves.  Two servers sharing a network namespace fight over it and the second one
   exits — hence the namespace per container, see below.
