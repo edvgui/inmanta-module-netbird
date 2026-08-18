@@ -16,14 +16,23 @@ limitations under the License.
 Contact: edvgui@gmail.com
 """
 
+import collections.abc
+import contextlib
 import getpass
 import pathlib
+import subprocess
 
 import inmanta_plugins.files
 import pytest
 import pytest_inmanta.plugin
 import requests
-from conftest import facts
+from conftest import facts, pasta_network, wait_until
+from test_peer import (
+    NETBIRD_CLIENT_IMAGE,
+    PEER_HOST,
+    PEER_REGISTRATION_TIMEOUT,
+    find_peer,
+)
 
 import inmanta.plugins
 from inmanta import const
@@ -69,6 +78,60 @@ def update_example(name: str, block: str) -> None:
         readme_file.write_text(
             readme[:start] + desired + readme[end + len(marker_end) :]
         )
+
+
+@contextlib.contextmanager
+def netbird_client(
+    netbird: requests.Session,
+    env_file: pathlib.Path,
+    hostname: str,
+) -> collections.abc.Iterator[None]:
+    """
+    Run the netbird client the example describes, and stop it again afterwards.
+
+    The environment file this reads is the one the deploy just wrote, key included: what
+    the container consumes is the artifact the model produced, not a copy of it.  Only
+    the management url is overridden, because the address the api is reached on from the
+    container's own network namespace is not the one the handler uses from the host, and
+    an explicit ``-e`` wins over ``--env-file``.
+    """
+    container_id = subprocess.run(
+        [
+            "podman",
+            "run",
+            "-d",
+            # A namespace of its own, plus what it takes to set up the wireguard
+            # interface: the same reasons as every other container in this suite.
+            "--network",
+            pasta_network({}),
+            "--cap-add",
+            "NET_ADMIN",
+            "--device",
+            "/dev/net/tun",
+            "--hostname",
+            hostname,
+            "--env-file",
+            str(env_file),
+            "-e",
+            "NB_MANAGEMENT_URL="
+            + netbird.management_url.replace("127.0.0.1", PEER_HOST),
+            NETBIRD_CLIENT_IMAGE,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    try:
+        wait_until(
+            lambda: find_peer(netbird, hostname) is not None,
+            container_id,
+            f"the netbird client did not register itself as {hostname}",
+            timeout=PEER_REGISTRATION_TIMEOUT,
+        )
+        yield
+    finally:
+        subprocess.run(["podman", "rm", "-f", container_id], capture_output=True)
 
 
 def client_model(management_url: str, home: pathlib.Path, user: str) -> str:
@@ -254,7 +317,8 @@ def test_netbird_client(
         "files::Directory", path=str(tmp_path / ".config" / "netbird")
     )
     project.deploy_resource("files::TextFile")
-    written = (tmp_path / ".config" / "netbird" / "client.env").read_text()
+    env_file_path = tmp_path / ".config" / "netbird" / "client.env"
+    written = env_file_path.read_text()
     # Jinja does not keep the trailing newline of the template.
     assert written == (
         f"NB_SETUP_KEY={key}\nNB_MANAGEMENT_URL={netbird.management_url}"
@@ -263,6 +327,20 @@ def test_netbird_client(
     # No client has registered yet, so there is no peer to adopt: the resource skips
     # rather than reporting a desired state it did not reach.
     project.deploy_resource("netbird::Peer", status=const.ResourceState.skipped)
+
+    # Run the client on the environment file that was just written.  Once it has joined
+    # the account there is a peer to adopt, and the resource converges.
+    with netbird_client(netbird, env_file_path, CLIENT_HOSTNAME):
+        project.deploy_resource("netbird::Peer")
+
+        peer = find_peer(netbird, CLIENT_HOSTNAME)
+        assert peer is not None
+        # The peer the model asked for, on the peer the key registered.
+        assert peer["ssh_enabled"] is False
+        assert facts(project)["id"] == peer["id"]
+
+        # And a second deploy of the same desired state changes nothing.
+        project.deploy_resource("netbird::Peer", change=const.Change.nochange)
 
     tested_model = pathlib.Path(project._test_project_dir, "main.cf").read_text()
     # The readme shows the home of a dedicated unprivileged user rather than the
