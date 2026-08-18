@@ -95,7 +95,7 @@ def netbird_client(
     container's own network namespace is not the one the handler uses from the host, and
     an explicit ``-e`` wins over ``--env-file``.
     """
-    container_id = subprocess.run(
+    started = subprocess.run(
         [
             "podman",
             "run",
@@ -117,11 +117,17 @@ def netbird_client(
             + netbird.management_url.replace("127.0.0.1", PEER_HOST),
             NETBIRD_CLIENT_IMAGE,
         ],
-        check=True,
         capture_output=True,
         text=True,
-    ).stdout.strip()
+    )
+    if started.returncode != 0:
+        # Say what podman said: a bare CalledProcessError only reports the exit code,
+        # which is nothing to go on when this fails somewhere other than this machine.
+        raise RuntimeError(
+            f"podman run failed ({started.returncode}): {started.stderr.strip()}"
+        )
 
+    container_id = started.stdout.strip()
     try:
         wait_until(
             lambda: find_peer(netbird, hostname) is not None,
