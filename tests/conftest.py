@@ -46,6 +46,50 @@ DEFAULT_GROUP = "All"
 # usually all it takes.
 SERVER_START_ATTEMPTS = 3
 
+# Every container these tests start carries a fixed name under this prefix.  A run that
+# is interrupted leaves its containers behind — the fixtures tear them down in a finally
+# block, which a killed process never reaches — and a fixed name means the next run
+# finds that leftover and replaces it instead of piling a new container next to it.  The
+# prefix keeps ``run_container`` away from anything on the machine that is not ours.
+CONTAINER_PREFIX = "netbird-test"
+SERVER_CONTAINER = f"{CONTAINER_PREFIX}-server"
+
+# How many bridge networks the server joins, and therefore how many peers can run
+# next to each other.  See ``peer_network``.
+PEER_NETWORKS = 2
+
+
+def run_container(name: str, args: collections.abc.Sequence[str]) -> str:
+    """
+    Start a detached container under a fixed name, replacing whatever holds that name
+    already, and return its id.
+
+    Only one container of a given name runs at a time, so **two copies of the suite can
+    no longer run next to each other**: the second one takes the first one's containers
+    away.  That is the trade for never leaving a server behind, which is worth it — a
+    leaked server holds its memory and its sqlite store until the machine is cleaned up
+    by hand.
+
+    :param name: The name to give the container, which is also the name of any leftover
+        to replace.
+    :param args: The arguments to ``podman run``, image included.
+    """
+    subprocess.run(["podman", "rm", "-f", name], capture_output=True)
+
+    started = subprocess.run(
+        ["podman", "run", "-d", "--name", name, *args],
+        capture_output=True,
+        text=True,
+    )
+    if started.returncode != 0:
+        # Say what podman said: a bare returncode is nothing to go on when this fails
+        # somewhere other than the machine the test was written on.
+        raise RuntimeError(
+            f"podman run {name} failed ({started.returncode}): {started.stderr.strip()}"
+        )
+
+    return started.stdout.strip()
+
 
 def free_port() -> int:
     """
@@ -57,31 +101,54 @@ def free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def pasta_network(forwarded_ports: collections.abc.Mapping[int, int]) -> str:
+def peer_network(index: int) -> str:
     """
-    The ``--network`` argument giving a container a network namespace of its own, with
-    the given ports forwarded into it from the host.
+    The name of the bridge network the peer container with the given index runs in.
 
-    Every container these tests start needs a namespace of its own, so that several
-    copies of the suite can run next to each other on one machine: the netbird server
-    binds a hardcoded ``:33073`` for its management grpc whatever the configuration
-    says, and two netbird clients would both want the same wireguard interface.
+    Every peer gets a network of its own, and the server joins all of them: a peer
+    reaches the api, the signal and the relay, and nothing else.  The networks are
+    created with ``isolate=true``, so netavark drops traffic between them — two peers
+    have no path to each other through the underlay and have to reach each other over
+    the netbird overlay, through the relay.
 
-    Forwarding is done by pasta rather than by ``--publish``: podman's own port
-    forwarder does not work when rootless podman itself runs inside a container, which
-    is exactly the CI setup, while pasta binds the host port from the parent namespace
-    and works in both.
-
-    :param forwarded_ports: The ports to forward, host port to container port.  A
-        container needing no port forwarded still needs its own namespace.
+    :param index: The index of the peer, from 0 to ``PEER_NETWORKS - 1``.
     """
-    if not forwarded_ports:
-        return "pasta"
+    return f"{CONTAINER_PREFIX}-net{index}"
 
-    ports = ",".join(
-        f"{host}:{container}" for host, container in forwarded_ports.items()
+
+def create_network(name: str) -> None:
+    """
+    Create an isolated bridge network under a fixed name, replacing whatever holds that
+    name already — the same reasoning as ``run_container``.
+
+    A bridge network rather than a namespace with nothing in it but the container: the
+    containers have to reach each other by name, which is what podman resolves on a
+    bridge network, and the server has to sit on several of them at once.
+
+    :param name: The name to give the network.
+    """
+    subprocess.run(["podman", "network", "rm", "-f", name], capture_output=True)
+
+    created = subprocess.run(
+        ["podman", "network", "create", "--opt", "isolate=true", name],
+        capture_output=True,
+        text=True,
     )
-    return f"pasta:--tcp-ports,{ports}"
+    if created.returncode != 0:
+        raise RuntimeError(
+            f"podman network create {name} failed ({created.returncode}): "
+            f"{created.stderr.strip()}"
+        )
+
+
+def peer_management_url(api_port: int) -> str:
+    """
+    The url the peers reach the management api on: the server container, by the name
+    podman resolves for it on every bridge network it joined.
+
+    :param api_port: The port the management api listens on inside the container.
+    """
+    return f"http://{SERVER_CONTAINER}:{api_port}"
 
 
 def server_config(*, api_port: int, path: pathlib.Path) -> pathlib.Path:
@@ -89,20 +156,20 @@ def server_config(*, api_port: int, path: pathlib.Path) -> pathlib.Path:
     Write the configuration of a single-node netbird server: management, signal,
     relay and stun, all served by one process.
 
-    The address the server advertises to its peers is the one they reach the host on
-    from their own network namespace, so that a netbird client container could
+    The address the server advertises to its peers is the one they reach the server
+    container on from their own bridge network, so that a netbird client container can
     register and pick up the signal and relay urls that go with it.
 
     Every other port the server binds (management grpc, stun, metrics, healthcheck)
     is left at its default: the container has a network namespace of its own, so those
-    are private to it and can not collide with another server's.
+    are private to it and can not collide with another server's.  The peers do reach
+    them, they are on the same bridges.
 
     :param api_port: The port the management api listens on, inside the container and
-        on the host alike — the same number on both ends keeps ``exposedAddress``
-        valid for peers.
+        on the host alike.
     :param path: The directory to write the configuration file in.
     """
-    peer_url = f"http://host.containers.internal:{api_port}"
+    peer_url = peer_management_url(api_port)
     config = path / "config.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -152,10 +219,10 @@ def wait_until(
     raise TimeoutError(f"{what} within {timeout}s:\n{logs.stdout}\n{logs.stderr}")
 
 
-def start_server(path: pathlib.Path) -> tuple[str, int]:
+def start_server(path: pathlib.Path) -> int:
     """
-    Start a netbird server and wait until its api answers, and return the id of the
-    container running it together with the port the api listens on.
+    Start a netbird server and wait until its api answers, and return the port the api
+    listens on.
 
     The port the api is forwarded on is picked by asking the kernel for a free one and
     letting it go again, so another process on the machine can take it in between.
@@ -171,15 +238,17 @@ def start_server(path: pathlib.Path) -> tuple[str, int]:
         api_port = free_port()
         config = server_config(api_port=api_port, path=root)
 
-        container_id = subprocess.run(
+        # No --rm: a server that dies on startup would take its logs with it, and those
+        # logs are all wait_until has to report.
+        container_id = run_container(
+            SERVER_CONTAINER,
             [
-                "podman",
-                "run",
-                "-d",
-                # No --rm: a server that dies on startup would take its logs with it,
-                # and those logs are all wait_until has to report.
+                # One bridge per peer, all of them joined at once: this container is
+                # the only thing the peers can reach besides themselves.
                 "--network",
-                pasta_network({api_port: api_port}),
+                ",".join(peer_network(index) for index in range(PEER_NETWORKS)),
+                "--publish",
+                f"127.0.0.1:{api_port}:{api_port}",
                 # Lets the setup api create the first owner and hand us back a token,
                 # instead of requiring a browser login against the embedded idp.
                 "-e",
@@ -192,10 +261,7 @@ def start_server(path: pathlib.Path) -> tuple[str, int]:
                 "--config",
                 "/etc/netbird/config.yaml",
             ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        )
 
         try:
             # The api answers 401 without a token, which is enough to know it is up.
@@ -213,7 +279,7 @@ def start_server(path: pathlib.Path) -> tuple[str, int]:
                 raise
             continue
 
-        return container_id, api_port
+        return api_port
 
     raise AssertionError("unreachable")
 
@@ -230,20 +296,26 @@ def netbird(tmp_path: pathlib.Path) -> collections.abc.Iterator[requests.Session
     The session carries the urls the tests and the models need:
       - ``base_url``: the api, as reached from the host running the tests,
       - ``management_url``: the same server, without the ``/api`` suffix, which is
-        what the ``netbird::Api`` entity takes.
+        what the ``netbird::Api`` entity takes,
+      - ``peer_management_url``: the same server, as reached by a peer container from
+        its bridge network.
 
-    The server gets a network namespace of its own with only its api port forwarded to
-    the host, never ``--network host``: it binds a hardcoded ``:33073`` no configuration
-    key moves, so two servers sharing a namespace fight over it and the second one
-    exits.  See ``pasta_network``.
+    The bridge networks the peers run in are created here and the server joins all of
+    them, never ``--network host``: it binds a hardcoded ``:33073`` no configuration key
+    moves, so two servers sharing a namespace fight over it and the second one exits.
+    See ``peer_network``.
     """
     if shutil.which("podman") is None:
         pytest.skip("podman is required to run the netbird server")
 
-    container_id, api_port = start_server(tmp_path)
-
-    url = f"http://127.0.0.1:{api_port}"
+    networks = [peer_network(index) for index in range(PEER_NETWORKS)]
     try:
+        for network in networks:
+            create_network(network)
+
+        api_port = start_server(tmp_path)
+        url = f"http://127.0.0.1:{api_port}"
+
         setup = requests.post(
             f"{url}/api/setup",
             json={
@@ -262,10 +334,17 @@ def netbird(tmp_path: pathlib.Path) -> collections.abc.Iterator[requests.Session
         session.headers["Authorization"] = f"Token {token}"
         session.base_url = f"{url}/api"
         session.management_url = url
+        session.peer_management_url = peer_management_url(api_port)
         session.token = token
         yield session
     finally:
-        subprocess.run(["podman", "rm", "-f", container_id], capture_output=True)
+        subprocess.run(["podman", "rm", "-f", SERVER_CONTAINER], capture_output=True)
+        # After the containers: a network still in use can not be removed.  The -f
+        # takes whatever is left on it down along with it.
+        for network in networks:
+            subprocess.run(
+                ["podman", "network", "rm", "-f", network], capture_output=True
+            )
 
 
 @pytest.fixture()
