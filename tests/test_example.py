@@ -19,6 +19,7 @@ Contact: edvgui@gmail.com
 import collections.abc
 import contextlib
 import getpass
+import json
 import pathlib
 import subprocess
 
@@ -26,10 +27,17 @@ import inmanta_plugins.files
 import pytest
 import pytest_inmanta.plugin
 import requests
-from conftest import facts, pasta_network, wait_until
+from conftest import (
+    CONTAINER_PREFIX,
+    facts,
+    get,
+    peer_network,
+    run_container,
+    wait_until,
+)
 from test_peer import (
     NETBIRD_CLIENT_IMAGE,
-    PEER_HOST,
+    PEER_CAPABILITIES,
     PEER_REGISTRATION_TIMEOUT,
     find_peer,
 )
@@ -37,8 +45,14 @@ from test_peer import (
 import inmanta.plugins
 from inmanta import const
 
-CLIENT_HOSTNAME = "lab-gateway"
+# The two gateways the example runs, in the order of the bridge networks they run in.
+CLIENT_HOSTNAMES = ["lab-gateway-a", "lab-gateway-b"]
 SETUP_KEY_NAME = "lab-gateways"
+
+# How long to give the two peers to reach each other over the overlay.  The client sets
+# a connection up lazily, when there is traffic for the other end, and it has to go
+# through the relay here.
+PEER_CONNECTION_TIMEOUT = 120.0
 
 # The template the environment file is rendered from, which the project running this
 # example provides.  The setup key is created inside the template, by the same
@@ -85,29 +99,31 @@ def netbird_client(
     netbird: requests.Session,
     env_file: pathlib.Path,
     hostname: str,
-) -> collections.abc.Iterator[None]:
+    network: str,
+) -> collections.abc.Iterator[str]:
     """
-    Run the netbird client the example describes, and stop it again afterwards.
+    Run one of the netbird clients the example describes, stop it again afterwards, and
+    yield the name of the container running it.
 
     The environment file this reads is the one the deploy just wrote, key included: what
     the container consumes is the artifact the model produced, not a copy of it.  Only
     the management url is overridden, because the address the api is reached on from the
-    container's own network namespace is not the one the handler uses from the host, and
-    an explicit ``-e`` wins over ``--env-file``.
+    container's own bridge network is not the one the handler uses from the host, and an
+    explicit ``-e`` wins over ``--env-file``.
+
+    :param env_file: The environment file the deploy wrote, holding the setup key.
+    :param hostname: The hostname the client registers itself under.
+    :param network: The bridge network to run the client in.
     """
-    started = subprocess.run(
+    container = f"{CONTAINER_PREFIX}-client-{hostname}"
+    run_container(
+        container,
         [
-            "podman",
-            "run",
-            "-d",
-            # A namespace of its own, plus what it takes to set up the wireguard
-            # interface: the same reasons as every other container in this suite.
+            # A bridge of its own, which the server joined too: the client reaches the
+            # api by name, and nothing else.
             "--network",
-            pasta_network({}),
-            "--cap-add",
-            "NET_ADMIN",
-            "--device",
-            "/dev/net/tun",
+            network,
+            *PEER_CAPABILITIES,
             # A uts namespace of its own, which is what makes the hostname settable:
             # podman refuses --hostname in the host uts namespace, and that is the
             # default in the container the ci job runs in.
@@ -118,40 +134,69 @@ def netbird_client(
             "--env-file",
             str(env_file),
             "-e",
-            "NB_MANAGEMENT_URL="
-            + netbird.management_url.replace("127.0.0.1", PEER_HOST),
+            f"NB_MANAGEMENT_URL={netbird.peer_management_url}",
             NETBIRD_CLIENT_IMAGE,
+        ],
+    )
+    try:
+        wait_until(
+            lambda: find_peer(netbird, hostname) is not None,
+            container,
+            f"the netbird client did not register itself as {hostname}",
+            timeout=PEER_REGISTRATION_TIMEOUT,
+        )
+        yield container
+    finally:
+        subprocess.run(["podman", "rm", "-f", container], capture_output=True)
+
+
+def underlay_address(container: str) -> str:
+    """
+    The address of a container on its bridge network — the underlay, as opposed to the
+    address netbird gives the peer.
+    """
+    inspected = subprocess.run(
+        [
+            "podman",
+            "inspect",
+            "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            container,
         ],
         capture_output=True,
         text=True,
     )
-    if started.returncode != 0:
-        # Say what podman said: a bare CalledProcessError only reports the exit code,
-        # which is nothing to go on when this fails somewhere other than this machine.
+    if inspected.returncode != 0:
         raise RuntimeError(
-            f"podman run failed ({started.returncode}): {started.stderr.strip()}"
+            f"podman inspect {container} failed ({inspected.returncode}): "
+            f"{inspected.stderr.strip()}"
         )
-
-    container_id = started.stdout.strip()
-    try:
-        wait_until(
-            lambda: find_peer(netbird, hostname) is not None,
-            container_id,
-            f"the netbird client did not register itself as {hostname}",
-            timeout=PEER_REGISTRATION_TIMEOUT,
-        )
-        yield
-    finally:
-        subprocess.run(["podman", "rm", "-f", container_id], capture_output=True)
+    return inspected.stdout.strip()
 
 
-def client_model(management_url: str, home: pathlib.Path, user: str) -> str:
+def ping(container: str, address: str) -> bool:
+    """
+    Send two pings from within a container, and report whether they were answered.
+    """
+    sent = subprocess.run(
+        ["podman", "exec", container, "ping", "-c", "2", "-W", "3", address],
+        capture_output=True,
+        text=True,
+    )
+    return sent.returncode == 0
+
+
+def client_model(
+    management_url: str,
+    home: pathlib.Path,
+    user: str,
+) -> str:
     """
     The model the readme shows, with the values the test needs to deploy it for real
     substituted in.
 
-    Everything runs rootless: the container is owned by an unprivileged user, its quadlet
-    unit is a user unit, and it is driven with ``systemctl --user``.
+    Everything runs rootless: the containers are owned by an unprivileged user, their
+    quadlet units are user units, and they are driven with ``systemctl --user``.
     """
     return f"""
         import files
@@ -175,18 +220,21 @@ def client_model(management_url: str, home: pathlib.Path, user: str) -> str:
             via=mitogen::Local(),
         )
 
-        # The client reports this as its hostname when it registers, and the hostname
-        # is what identifies a peer here: the api offers no way to change it, while the
-        # name of a peer is one of the values this model rewrites.
-        hostname = "{CLIENT_HOSTNAME}"
+        # Each client reports its own hostname when it registers, and the hostname is
+        # what identifies a peer here: the api offers no way to change it, while the
+        # name of a peer is one of the values this model rewrites.  Two gateways, so
+        # that there is an overlay to speak of: once both have joined the account they
+        # reach each other over it, wherever they sit on the underlay.
+        hostnames = {json.dumps(CLIENT_HOSTNAMES)}
 
         # Everything below runs rootless, as this unprivileged user.  It needs access to
         # /dev/net/tun, and `loginctl enable-linger` on it, so that its units keep
         # running while it is not logged in.
         user = "{user}"
 
-        # The token the client registers with.  The api generates it and the model
-        # never sees the value: it is published as a fact when the key is created.
+        # The token both clients register with.  The api generates it and the model
+        # never sees the value: it is published as a fact when the key is created.  A
+        # reusable key, since more than one client joins with it.
         setup_key = netbird::SetupKey(
             api=api,
             name="{SETUP_KEY_NAME}",
@@ -194,69 +242,73 @@ def client_model(management_url: str, home: pathlib.Path, user: str) -> str:
             expires_in=86400,
         )
 
-        config_dir = files::Directory(
-            host=host,
-            path="{home}/.config/netbird",
-            owner=user,
-            create_parents=true,
-        )
+        for hostname in hostnames:
+            # One configuration directory per client: they share the account and the
+            # key, nothing else.
+            config_dir = files::Directory(
+                host=host,
+                path=f"{home}/.config/netbird/{{hostname}}",
+                owner=user,
+                create_parents=true,
+            )
 
-        # The key can not go through podman::Container.env: the quadlet file is rendered
-        # at compile time, where the key is still a reference and not a string.  It goes
-        # through an environment file instead, whose content stays a reference until the
-        # agent writes it on the host.
-        env_file = files::TextFile(
-            host=host,
-            # No need to require the directory, the files exporter wires that up.
-            path=f"{{config_dir.path}}/client.env",
-            content=files::jinja(
-                "template:///netbird-client.env.j2",
-                setup_key=setup_key,
-                management_url=api.management_url,
-            ),
-            owner=user,
-            # The key is a secret: only its owner gets to read it.
-            permissions=600,
-            # A fact reference is not a dependency: the key has to exist, and its fact
-            # to be published, before the agent can resolve it here.
-            requires=setup_key,
-        )
+            # The key can not go through podman::Container.env: the quadlet file is
+            # rendered at compile time, where the key is still a reference and not a
+            # string.  It goes through an environment file instead, whose content stays
+            # a reference until the agent writes it on the host.
+            env_file = files::TextFile(
+                host=host,
+                # No need to require the directory, the files exporter wires that up.
+                path=f"{{config_dir.path}}/client.env",
+                content=files::jinja(
+                    "template:///netbird-client.env.j2",
+                    setup_key=setup_key,
+                    management_url=api.management_url,
+                ),
+                owner=user,
+                # The key is a secret: only its owner gets to read it.
+                permissions=600,
+                # A fact reference is not a dependency: the key has to exist, and its
+                # fact to be published, before the agent can resolve it here.
+                requires=setup_key,
+            )
 
-        # The netbird client itself.  NET_ADMIN and /dev/net/tun are what it takes to
-        # set up the wireguard interface.
-        client = podman::Container(
-            host=host,
-            owner=user,
-            name="netbird",
-            hostname=hostname,
-            image="docker.io/netbirdio/netbird:latest",
-            env_file=env_file.path,
-            add_capability=["NET_ADMIN"],
-            add_device=["/dev/net/tun"],
-            requires=env_file,
-        )
+            # The netbird client itself.  NET_ADMIN, NET_RAW and /dev/net/tun are what
+            # it takes to bring the wireguard interface up.
+            client = podman::Container(
+                host=host,
+                owner=user,
+                name=hostname,
+                hostname=hostname,
+                image="docker.io/netbirdio/netbird:latest",
+                env_file=env_file.path,
+                add_capability=["NET_ADMIN", "NET_RAW"],
+                add_device=["/dev/net/tun"],
+                requires=env_file,
+            )
 
-        # podman::Container is not a resource of its own: it is rendered into a quadlet
-        # unit, and that unit file is what gets deployed.
-        service = podman::services::SystemdContainer(
-            container=client,
-            state="running",
-            enabled=true,
-            quadlet=true,
-            systemd_unit_dir="{home}/.config/systemd/user",
-            systemd_container_dir="{home}/.config/containers/systemd",
-            systemctl_command=["systemctl", "--user"],
-        )
+            # podman::Container is not a resource of its own: it is rendered into a
+            # quadlet unit, and that unit file is what gets deployed.
+            service = podman::services::SystemdContainer(
+                container=client,
+                state="running",
+                enabled=true,
+                quadlet=true,
+                systemd_unit_dir="{home}/.config/systemd/user",
+                systemd_container_dir="{home}/.config/containers/systemd",
+                systemctl_command=["systemctl", "--user"],
+            )
 
-        # And the peer the client registered.  This resource adopts a peer rather than
-        # creating one, so it only deploys once the client has joined the account:
-        # before that it skips, saying so.
-        netbird::Peer(
-            api=api,
-            hostname=hostname,
-            ssh_enabled=false,
-            requires=service.resources,
-        )
+            # And the peer the client registered.  This resource adopts a peer rather
+            # than creating one, so it only deploys once the client has joined the
+            # account: before that it skips, saying so.
+            netbird::Peer(
+                api=api,
+                hostname=hostname,
+                ssh_enabled=false,
+                requires=service.resources,
+            )
+        end
     """
 
 
@@ -267,16 +319,21 @@ def test_netbird_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Run a netbird client in a container and adopt the peer it registers.
+    Run two netbird clients in containers, adopt the peers they register, and check
+    that they reach each other over the overlay.
 
     A peer can not be created through the api, so the only way to get one is to run a
     client that registers itself.  What this test drives is the hand-off that makes that
     possible: the key the module creates is published as a fact, the reference to it is
-    resolved on the agent, and the value the client registers with lands in the
-    environment file on the host.
+    resolved on the agent, and the value the clients register with lands in the
+    environment files on the host.
 
-    The systemd resources of the service are deliberately left undeployed: the podman
-    module runs ``systemctl --user daemon-reload`` and enables and starts the unit on a
+    The two clients run on bridge networks the api container joined and that are
+    isolated from each other, so there is no path between them on the underlay: the
+    ping that goes through is the overlay the account gives them, relayed by the server.
+
+    The systemd resources of the services are deliberately left undeployed: the podman
+    module runs ``systemctl --user daemon-reload`` and enables and starts the units on a
     unit file change, which is not this test's business to do on the machine it runs on.
     """
     monkeypatch.setenv("NETBIRD_TOKEN", netbird.token)
@@ -289,27 +346,39 @@ def test_netbird_client(
     template_dir.mkdir(parents=True, exist_ok=True)
     (template_dir / "netbird-client.env.j2").write_text(ENV_TEMPLATE)
 
+    config_dirs = {
+        hostname: tmp_path / ".config" / "netbird" / hostname
+        for hostname in CLIENT_HOSTNAMES
+    }
+    env_files = {
+        hostname: config_dir / "client.env"
+        for hostname, config_dir in config_dirs.items()
+    }
+
     model = client_model(netbird.management_url, tmp_path, user)
     project.compile(model, no_dedent=False)
 
-    # The key reaches the environment file as a reference: the desired state carries the
-    # reference, never the secret itself.
-    env_file = project.get_instances("files::TextFile").pop()
-    content = inmanta.plugins.allow_reference_values(env_file).content
-    assert isinstance(content, inmanta_plugins.files.JinjaReference)
+    # The key reaches both environment files as a reference: the desired state carries
+    # the reference, never the secret itself.
+    assert len(project.get_instances("files::TextFile")) == len(CLIENT_HOSTNAMES)
+    for env_file in project.get_instances("files::TextFile"):
+        content = inmanta.plugins.allow_reference_values(env_file).content
+        assert isinstance(content, inmanta_plugins.files.JinjaReference)
 
-    # The container is not a resource, the quadlet unit file it renders into is, and
-    # that is what points the client at the environment file.
+    # The containers are not resources, the quadlet unit files they render into are, and
+    # those are what point the clients at their environment files.
     assert project.get_resource("podman::Container") is None
-    quadlet = next(
-        r
-        for r in project.resources.values()
-        if str(getattr(r, "path", "")).endswith("netbird.container")
-    )
-    assert f"EnvironmentFile={tmp_path}/.config/netbird/client.env" in quadlet.content
-    assert "Image=docker.io/netbirdio/netbird:latest" in quadlet.content
-    assert f"HostName={CLIENT_HOSTNAME}" in quadlet.content
-    assert "AddCapability=NET_ADMIN" in quadlet.content
+    for hostname in CLIENT_HOSTNAMES:
+        quadlet = next(
+            r
+            for r in project.resources.values()
+            if str(getattr(r, "path", "")).endswith(f"{hostname}.container")
+        )
+        assert f"EnvironmentFile={env_files[hostname]}" in quadlet.content
+        assert "Image=docker.io/netbirdio/netbird:latest" in quadlet.content
+        assert f"HostName={hostname}" in quadlet.content
+        assert "AddCapability=NET_ADMIN" in quadlet.content
+        assert "AddCapability=NET_RAW" in quadlet.content
 
     # Deploying the key creates it on the account and publishes its value as a fact.
     project.deploy_resource("netbird::SetupKey")
@@ -322,36 +391,73 @@ def test_netbird_client(
     project.add_fact(setup_key_resource.id.resource_str(), "key", key)
     project.compile(model, no_dedent=False)
 
-    # The environment file is written with the key the api generated, resolved on the
+    # The environment files are written with the key the api generated, resolved on the
     # agent.  This hand-off is what the whole example exists for.
-    project.deploy_resource(
-        "files::Directory", path=str(tmp_path / ".config" / "netbird")
-    )
-    project.deploy_resource("files::TextFile")
-    env_file_path = tmp_path / ".config" / "netbird" / "client.env"
-    written = env_file_path.read_text()
-    # Jinja does not keep the trailing newline of the template.
-    assert written == (
-        f"NB_SETUP_KEY={key}\nNB_MANAGEMENT_URL={netbird.management_url}"
-    )
+    for hostname in CLIENT_HOSTNAMES:
+        project.deploy_resource("files::Directory", path=str(config_dirs[hostname]))
+        project.deploy_resource("files::TextFile", path=str(env_files[hostname]))
+        # Jinja does not keep the trailing newline of the template.
+        assert env_files[hostname].read_text() == (
+            f"NB_SETUP_KEY={key}\nNB_MANAGEMENT_URL={netbird.management_url}"
+        )
 
-    # No client has registered yet, so there is no peer to adopt: the resource skips
-    # rather than reporting a desired state it did not reach.
-    project.deploy_resource("netbird::Peer", status=const.ResourceState.skipped)
+        # No client has registered yet, so there is no peer to adopt: the resource skips
+        # rather than reporting a desired state it did not reach.
+        project.deploy_resource(
+            "netbird::Peer", hostname=hostname, status=const.ResourceState.skipped
+        )
 
-    # Run the client on the environment file that was just written.  Once it has joined
-    # the account there is a peer to adopt, and the resource converges.
-    with netbird_client(netbird, env_file_path, CLIENT_HOSTNAME):
-        project.deploy_resource("netbird::Peer")
+    # Run the clients on the environment files that were just written, each on a bridge
+    # network of its own.  Once they have joined the account there are peers to adopt,
+    # and the resources converge.
+    with contextlib.ExitStack() as clients:
+        containers = {
+            hostname: clients.enter_context(
+                netbird_client(
+                    netbird,
+                    env_files[hostname],
+                    hostname,
+                    peer_network(index),
+                )
+            )
+            for index, hostname in enumerate(CLIENT_HOSTNAMES)
+        }
 
-        peer = find_peer(netbird, CLIENT_HOSTNAME)
-        assert peer is not None
-        # The peer the model asked for, on the peer the key registered.
-        assert peer["ssh_enabled"] is False
-        assert facts(project)["id"] == peer["id"]
+        for hostname in CLIENT_HOSTNAMES:
+            project.deploy_resource("netbird::Peer", hostname=hostname)
 
-        # And a second deploy of the same desired state changes nothing.
-        project.deploy_resource("netbird::Peer", change=const.Change.nochange)
+            peer = find_peer(netbird, hostname)
+            assert peer is not None
+            # The peer the model asked for, on the peer the key registered.
+            assert peer["ssh_enabled"] is False
+            assert facts(project)["id"] == peer["id"]
+
+            # And a second deploy of the same desired state changes nothing.
+            project.deploy_resource(
+                "netbird::Peer", hostname=hostname, change=const.Change.nochange
+            )
+
+        # The two gateways reach each other over the overlay the account gives them.
+        # The client sets that connection up on the first packet, and it has to go
+        # through the server's relay, so give it a moment.
+        peers = {peer["hostname"]: peer for peer in get(netbird, "peers")}
+        source, destination = CLIENT_HOSTNAMES
+        wait_until(
+            lambda: ping(containers[source], peers[destination]["ip"]),
+            containers[source],
+            f"{source} could not reach {destination} over the overlay",
+            timeout=PEER_CONNECTION_TIMEOUT,
+        )
+
+        # And there is no other way for them to reach each other: their bridges are
+        # isolated, so the underlay address of one is unreachable from the other.  The
+        # container itself answers on that address, which is what makes the failure
+        # below say something about the isolation rather than about the address.
+        underlay = underlay_address(containers[destination])
+        assert ping(containers[destination], underlay)
+        assert not ping(
+            containers[source], underlay
+        ), "the two bridge networks are not isolated, the ping above proves nothing"
 
     tested_model = pathlib.Path(project._test_project_dir, "main.cf").read_text()
     # The readme shows the home of a dedicated unprivileged user rather than the
