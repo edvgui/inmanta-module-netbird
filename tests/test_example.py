@@ -48,6 +48,9 @@ from inmanta import const
 # The two gateways the example runs, in the order of the bridge networks they run in.
 CLIENT_HOSTNAMES = ["lab-gateway-a", "lab-gateway-b"]
 SETUP_KEY_NAME = "lab-gateways"
+GROUP_NAME = "lab-gateways"
+NAMESERVER_GROUP_NAME = "lab-dns"
+DNS_DOMAIN = "lab.example.com"
 
 # How long to give the two peers to reach each other over the overlay.  The client sets
 # a connection up lazily, when there is traffic for the other end, and it has to go
@@ -232,6 +235,14 @@ def client_model(
         # running while it is not logged in.
         user = "{user}"
 
+        # The group the two gateways end up in.  Its `peers` are left null, so the
+        # model does not manage them: the clients join by registering with the key
+        # below, which is what the key's auto groups do.
+        gateways = netbird::Group(
+            api=api,
+            name="{GROUP_NAME}",
+        )
+
         # The token both clients register with.  The api generates it and the model
         # never sees the value: it is published as a fact when the key is created.  A
         # reusable key, since more than one client joins with it.
@@ -240,6 +251,37 @@ def client_model(
             name="{SETUP_KEY_NAME}",
             type="reusable",
             expires_in=86400,
+            # The id of a group the model never reads either: it is a reference on the
+            # fact the group's own resource publishes.  Every peer registering with
+            # this key lands in that group.
+            auto_groups=[gateways.id],
+            # The api refuses an auto group it doesn't know, so the group has to be
+            # there first.  A reference is not a dependency of its own.
+            requires=gateways,
+        )
+
+        # The dns the gateways resolve the lab's own domain with.  The api wants one to
+        # three servers, at least one group to distribute them to, and either the
+        # primary flag or a domain — never both, never neither.
+        netbird::NameserverGroup(
+            api=api,
+            name="{NAMESERVER_GROUP_NAME}",
+            enabled=true,
+            groups=[gateways.id],
+            domains=["{DNS_DOMAIN}"],
+            nameservers=[
+                netbird::Nameserver(ip="9.9.9.9", ns_type="udp", port=53),
+                netbird::Nameserver(ip="1.1.1.1", ns_type="udp", port=53),
+            ],
+            requires=gateways,
+        )
+
+        # And netbird resolves for every peer of the account: no group opts out of it.
+        # These settings are a singleton the api creates with the account, so this
+        # resource only ever updates them — purging it is an error.
+        netbird::DnsSettings(
+            api=api,
+            disabled_management_groups=[],
         )
 
         for hostname in hostnames:
@@ -335,6 +377,9 @@ def test_netbird_client(
     The systemd resources of the services are deliberately left undeployed: the podman
     module runs ``systemctl --user daemon-reload`` and enables and starts the units on a
     unit file change, which is not this test's business to do on the machine it runs on.
+    So are the dns resources of the example: they need neither a client nor an overlay,
+    and ``tests/test_dns.py`` deploys them against the same api.  They are part of the
+    model because the readme shows a whole account, not because this test drives them.
     """
     monkeypatch.setenv("NETBIRD_TOKEN", netbird.token)
 
@@ -380,13 +425,28 @@ def test_netbird_client(
         assert "AddCapability=NET_ADMIN" in quadlet.content
         assert "AddCapability=NET_RAW" in quadlet.content
 
+    # The group comes first: the setup key's auto groups and the nameserver group both
+    # point at its id, and the api refuses a group id it doesn't know.
+    project.deploy_resource("netbird::Group")
+    group_resource = project.get_resource("netbird::Group")
+    group_id = facts(project)["id"]
+
+    # std::create_fact_reference snapshots the fact store at compile time, so a fact has
+    # to be seeded before the compile that builds the reference the deploy resolves.
+    project.add_fact(group_resource.id.resource_str(), "id", group_id)
+    project.compile(model, no_dedent=False)
+
     # Deploying the key creates it on the account and publishes its value as a fact.
+    # Its auto groups resolved to the id the group's own resource published — the model
+    # fed one resource from another without ever knowing the value.
     project.deploy_resource("netbird::SetupKey")
     key = facts(project)["key"]
     assert "*" not in key
+    setup_key = next(
+        k for k in get(netbird, "setup-keys") if k["name"] == SETUP_KEY_NAME
+    )
+    assert setup_key["auto_groups"] == [group_id]
 
-    # std::create_fact_reference snapshots the fact store at compile time, so the fact
-    # has to be seeded before the compile that builds the reference the deploy resolves.
     setup_key_resource = project.get_resource("netbird::SetupKey")
     project.add_fact(setup_key_resource.id.resource_str(), "key", key)
     project.compile(model, no_dedent=False)
@@ -437,10 +497,19 @@ def test_netbird_client(
                 "netbird::Peer", hostname=hostname, change=const.Change.nochange
             )
 
+        peers = {peer["hostname"]: peer for peer in get(netbird, "peers")}
+
+        # Both clients registered with the key, so both peers are in the group its auto
+        # groups named — the model never listed them there, and it could not have: it
+        # does not know the ids the api handed out.
+        group = next(g for g in get(netbird, "groups") if g["name"] == GROUP_NAME)
+        assert sorted(member["id"] for member in group["peers"]) == sorted(
+            peer["id"] for peer in peers.values()
+        )
+
         # The two gateways reach each other over the overlay the account gives them.
         # The client sets that connection up on the first packet, and it has to go
         # through the server's relay, so give it a moment.
-        peers = {peer["hostname"]: peer for peer in get(netbird, "peers")}
         source, destination = CLIENT_HOSTNAMES
         wait_until(
             lambda: ping(containers[source], peers[destination]["ip"]),
