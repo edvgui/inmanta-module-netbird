@@ -28,7 +28,7 @@ from conftest import (
     CONTAINER_PREFIX,
     facts,
     get,
-    pasta_network,
+    peer_network,
     run_container,
     wait_until,
 )
@@ -41,9 +41,17 @@ NETBIRD_CLIENT_IMAGE = "docker.io/netbirdio/netbird:latest"
 # How long to give the netbird client to start and register itself.
 PEER_REGISTRATION_TIMEOUT = 180.0
 
-# The host the netbird client reaches the server on from its own network namespace.
-# It is the address the server advertises to its peers, see ``server_config``.
-PEER_HOST = "host.containers.internal"
+# What it takes for the client to bring its wireguard interface up: NET_ADMIN for the
+# interface itself, NET_RAW for the raw socket it probes with (``failed to create ipv4
+# raw socket`` without it, and no overlay), and the tun device.
+PEER_CAPABILITIES = [
+    "--cap-add",
+    "NET_ADMIN",
+    "--cap-add",
+    "NET_RAW",
+    "--device",
+    "/dev/net/tun",
+]
 
 Compile = collections.abc.Callable[[str], None]
 
@@ -55,8 +63,8 @@ def peer(netbird: requests.Session) -> collections.abc.Iterator[dict]:
     and yield the peer as the api reports it.
 
     A peer can not be created through the api, so this is the only way to get one:
-    the client joins with a setup key, and the server advertises to it the url it
-    reaches the host on from its own network namespace.
+    the client joins with a setup key, and the server advertises to it the url it is
+    reached on from the bridge network they share.
     """
     key = netbird.post(
         f"{netbird.base_url}/setup-keys",
@@ -74,19 +82,15 @@ def peer(netbird: requests.Session) -> collections.abc.Iterator[dict]:
     container_id = run_container(
         f"{CONTAINER_PREFIX}-peer",
         [
-            # A network namespace of its own, so that the client does not fight over the
-            # host's wireguard interface, plus what it takes to set that interface up.
+            # A bridge of its own, which the server joined too: the client does not
+            # fight over the host's wireguard interface, and reaches the api by name.
             "--network",
-            pasta_network({}),
-            "--cap-add",
-            "NET_ADMIN",
-            "--device",
-            "/dev/net/tun",
+            peer_network(0),
+            *PEER_CAPABILITIES,
             "-e",
             f"NB_SETUP_KEY={key.json()['key']}",
             "-e",
-            "NB_MANAGEMENT_URL="
-            + netbird.management_url.replace("127.0.0.1", PEER_HOST),
+            f"NB_MANAGEMENT_URL={netbird.peer_management_url}",
             NETBIRD_CLIENT_IMAGE,
         ],
     )
