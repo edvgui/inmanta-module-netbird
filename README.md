@@ -271,21 +271,35 @@ end
 
 A netbird network is a container: the addresses it gives access to and the peers routing
 towards them are objects of their own, addressed under its id.  The example below builds
-one whole — the two groups the account is expressed in terms of, the office subnet, the
-gateways routing it, and a dns zone naming the hosts behind it — and the test running it
-deploys every bit of it against a real server.
+one whole — the groups the account is expressed in terms of, the keys the peers join
+with, the office subnet, the gateways routing it, and a dns zone naming the hosts behind
+it.
 
-Nothing in it writes an id down.  The api addresses everything by opaque id, so the
-network resource points at its network with `network.id`, the router at its group with
-`gateways.id` and the records at their zone with `zone.id`: each of them is a reference
-on the fact the other resource publishes, resolved on the agent at deploy time.  The
-`requires` next to them are not redundant — a reference is not a dependency, and the api
-refuses a resource in a network that does not exist yet.
+The test running it deploys every bit of that against a real server and then checks that
+it routes.  Two netbird clients run in containers on bridge networks isolated from each
+other, and a third container stands in for a printer on the gateway's own bridge, running
+no netbird client at all.  Before the network resource and its router are deployed the
+client has no way to reach that printer; afterwards it reaches it by address, and once the
+zone is deployed by name — over the overlay, through a peer forwarding for a host that
+never heard of netbird.
+
+Nothing in the model writes an id down.  The api addresses everything by opaque id, so
+the keys point at their group with `gateways.id` and `clients.id`, the network resource at
+its network with `network.id` and the records at their zone with `zone.id`: each of them
+is a reference on the fact the other resource publishes, resolved on the agent at deploy
+time.  The `requires` next to them are not redundant — a reference is not a dependency,
+and the api refuses a resource in a network that does not exist yet.
+
+Which peers may reach the subnet is decided elsewhere: netbird grants that with a policy
+from the group of the peers to the group of the resource, and a policy is not a resource
+of this module yet — the test creates it through the api.  That is also why the resource
+gets a group of its own: the groups of a network resource are what a policy points at,
+they are not the peers reaching it.
 
 The router routes for a group rather than for a named peer: `peer` and `peer_groups` are
 mutually exclusive, and exactly one of them has to be set.  Going through a group means
-the model does not have to know which peers are gateways today — whoever registers into
-that group starts routing.
+the model does not have to know which peers are gateways today — whoever registers with
+the gateway key starts routing.
 
 <x-example-netbird-network>
 
@@ -313,8 +327,8 @@ netbird::User(
 
 # The two groups the account is expressed in terms of: the peers routing
 # towards the office lan, and the peers allowed to reach it.  Their `peers` are
-# left null, so the model does not manage the membership — the peers get there
-# by registering with a setup key whose auto groups name these groups.
+# left null, so the model does not manage the membership — a peer gets there by
+# registering with the key whose auto groups name the group.
 gateways = netbird::Group(
     api=api,
     name="office-gateways",
@@ -322,6 +336,36 @@ gateways = netbird::Group(
 clients = netbird::Group(
     api=api,
     name="office-clients",
+)
+
+# And the group the office lan itself is in.  The groups of a network resource
+# are what the policies of the account point at, they are not the peers reaching
+# it: a resource is a destination, not a member.
+lan = netbird::Group(
+    api=api,
+    name="office-lan",
+)
+
+# One key per role, so that what a peer is follows from the key it joined with.
+# The api generates the key and shows it once: the model never holds the value,
+# it is published as a fact when the key is created.
+netbird::SetupKey(
+    api=api,
+    name="office-gateways",
+    type="reusable",
+    expires_in=86400,
+    auto_groups=[gateways.id],
+    # The api refuses an auto group it doesn't know, and a reference is not a
+    # dependency of its own.
+    requires=gateways,
+)
+netbird::SetupKey(
+    api=api,
+    name="office-clients",
+    type="reusable",
+    expires_in=86400,
+    auto_groups=[clients.id],
+    requires=clients,
 )
 
 # The network holding what the gateways give access to.  A netbird network is
@@ -333,20 +377,21 @@ network = netbird::Network(
     description="The office lan, reached through the gateways",
 )
 
-# What the network gives access to, and who may reach it.  The api derives the
-# type of a resource from its address — a host address, a subnet or a domain —
-# so there is no type to set here.
+# What the network gives access to.  The api derives the type of a resource
+# from its address — a host address, a subnet or a domain — so there is no type
+# to set here.  Which peers may reach it is decided by a policy from their group
+# to the group of the resource, and a policy is not a resource of this module
+# yet.
 netbird::NetworkResource(
     api=api,
     _network=network.id,
     name="office-lan",
     address="10.10.0.0/24",
     enabled=true,
-    groups=[clients.id],
-    # A reference is not a dependency of its own: the api refuses a resource in
-    # a network that does not exist, and silently drops a group id it does not
-    # know.
-    requires=[network, clients],
+    groups=[lan.id],
+    # The api refuses a resource in a network that does not exist, and silently
+    # drops a group id it does not know.
+    requires=[network, lan],
 )
 
 # And who routes the traffic there: the peers of the gateway group rather than
@@ -360,6 +405,8 @@ netbird::NetworkRouter(
     _name="office-gateways",
     peer_groups=[gateways.id],
     metric=9999,
+    # The hosts of the office lan know nothing of netbird, so the gateway
+    # rewrites the source address of what it routes for them.
     masquerade=true,
     enabled=true,
     requires=[network, gateways],

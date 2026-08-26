@@ -225,10 +225,12 @@ Two hooks to override:
   somewhere to go, so a ping is what makes it happen rather than something to do once it
   has: retry the ping instead of waiting for the connection.
 
-## The readme example is compiled and deployed by a test
+## The readme examples are compiled and deployed by a test
 
-`tests/test_example.py` builds the model the readme shows, compiles it, deploys the part
-that is safe to deploy, and writes the result back between the `<x-example-...>` markers
+`tests/test_example.py` (registering peers) and `tests/test_example_network.py` (routing a
+network and naming what is behind it) build the models the readme shows, compile them,
+deploy the part that is safe to deploy, and write the result back between the
+`<x-example-...>` markers
 in `README.md` — same mechanism as `inmanta-module-podman` and `inmanta-module-files`.
 Edit the model in the test, never the readme.  What that exercise turned up:
 
@@ -260,6 +262,22 @@ Edit the model in the test, never the readme.  What that exercise turned up:
 - Never start a container with `check=True` and `capture_output=True` alone: the
   `CalledProcessError` carries the exit code and throws podman's message away, which is
   the only thing that explains a failure happening somewhere other than this machine.
+- **A network resource is reached only through a policy.**  The fresh account's `Default`
+  policy is `All` to `All`, and a resource is in no group but the ones it was given, so
+  nothing reaches it until a policy points from the group of the peers to the group of
+  the resource.  There is no `netbird::Policy` resource yet: `grant_access` in
+  `tests/test_example_network.py` posts it to `/api/policies` as scaffolding.  Give the
+  resource a group of its own — its `groups` are policy destinations, not the peers
+  reaching it.
+- A **routing peer in a container needs `--sysctl net.ipv4.ip_forward=1`**: rootless
+  podman mounts `/proc/sys` read only, so the client can not turn forwarding on itself,
+  and it routes nothing without saying why.  `masquerade=true` on the router is what makes
+  the return traffic work, the hosts behind the gateway having no route to the overlay.
+- The client writes its own `/etc/resolv.conf` in the container, so a dns zone record
+  resolves there: `ping <name>` from a peer container is a working check of a
+  `netbird::DnsZone` and its records, no resolver setup needed.
+- A container standing in for a plain host costs no extra pull: start the netbird client
+  image with `--entrypoint sleep <image> infinity` and it is a busybox that answers pings.
 
 ## Testing
 

@@ -386,6 +386,69 @@ def facts(project: pytest_inmanta.plugin.Project) -> dict[str, str]:
     return {fact["id"]: fact["value"] for fact in project.ctx.facts}
 
 
+def underlay_address(container: str) -> str:
+    """
+    The address of a container on its bridge network — the underlay, as opposed to the
+    address netbird gives the peer.
+    """
+    inspected = subprocess.run(
+        [
+            "podman",
+            "inspect",
+            "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            container,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if inspected.returncode != 0:
+        raise RuntimeError(
+            f"podman inspect {container} failed ({inspected.returncode}): "
+            f"{inspected.stderr.strip()}"
+        )
+    return inspected.stdout.strip()
+
+
+def network_subnet(network: str) -> str:
+    """
+    The subnet of a podman bridge network, in cidr notation.  It is the address range
+    the containers on that network sit in, and therefore what a netbird network
+    resource has to name for the peers elsewhere on the account to reach them.
+    """
+    inspected = subprocess.run(
+        [
+            "podman",
+            "network",
+            "inspect",
+            "--format",
+            "{{range .Subnets}}{{.Subnet}}{{end}}",
+            network,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if inspected.returncode != 0:
+        raise RuntimeError(
+            f"podman network inspect {network} failed ({inspected.returncode}): "
+            f"{inspected.stderr.strip()}"
+        )
+    return inspected.stdout.strip()
+
+
+def ping(container: str, target: str) -> bool:
+    """
+    Send two pings from within a container, and report whether they were answered.  The
+    target is an address or a name, so this is a dns check as much as a routing one.
+    """
+    sent = subprocess.run(
+        ["podman", "exec", container, "ping", "-c", "2", "-W", "3", target],
+        capture_output=True,
+        text=True,
+    )
+    return sent.returncode == 0
+
+
 def update_example(name: str, block: str) -> None:
     """
     Find the example with the given name in the readme, and make sure the block it

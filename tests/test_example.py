@@ -32,7 +32,9 @@ from conftest import (
     facts,
     get,
     peer_network,
+    ping,
     run_container,
+    underlay_address,
     update_example,
     wait_until,
 )
@@ -122,42 +124,6 @@ def netbird_client(
         yield container
     finally:
         subprocess.run(["podman", "rm", "-f", container], capture_output=True)
-
-
-def underlay_address(container: str) -> str:
-    """
-    The address of a container on its bridge network — the underlay, as opposed to the
-    address netbird gives the peer.
-    """
-    inspected = subprocess.run(
-        [
-            "podman",
-            "inspect",
-            "--format",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            container,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if inspected.returncode != 0:
-        raise RuntimeError(
-            f"podman inspect {container} failed ({inspected.returncode}): "
-            f"{inspected.stderr.strip()}"
-        )
-    return inspected.stdout.strip()
-
-
-def ping(container: str, address: str) -> bool:
-    """
-    Send two pings from within a container, and report whether they were answered.
-    """
-    sent = subprocess.run(
-        ["podman", "exec", container, "ping", "-c", "2", "-W", "3", address],
-        capture_output=True,
-        text=True,
-    )
-    return sent.returncode == 0
 
 
 def client_model(
