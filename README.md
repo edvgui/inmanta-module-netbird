@@ -267,6 +267,145 @@ end
 
 </x-example-netbird-client>
 
+### Routing a network, and naming what is behind it
+
+A netbird network is a container: the addresses it gives access to and the peers routing
+towards them are objects of their own, addressed under its id.  The example below builds
+one whole — the two groups the account is expressed in terms of, the office subnet, the
+gateways routing it, and a dns zone naming the hosts behind it — and the test running it
+deploys every bit of it against a real server.
+
+Nothing in it writes an id down.  The api addresses everything by opaque id, so the
+network resource points at its network with `network.id`, the router at its group with
+`gateways.id` and the records at their zone with `zone.id`: each of them is a reference
+on the fact the other resource publishes, resolved on the agent at deploy time.  The
+`requires` next to them are not redundant — a reference is not a dependency, and the api
+refuses a resource in a network that does not exist yet.
+
+The router routes for a group rather than for a named peer: `peer` and `peer_groups` are
+mutually exclusive, and exactly one of them has to be set.  Going through a group means
+the model does not have to know which peers are gateways today — whoever registers into
+that group starts routing.
+
+<x-example-netbird-network>
+
+```
+import netbird
+import std
+
+api = netbird::Api(
+    agent_name="netbird",
+    management_url="https://api.netbird.io",
+    # A reference, not std::get_env: the token stays out of the desired state
+    # and is resolved on the agent, at deploy time.
+    api_token=std::create_environment_reference("NETBIRD_TOKEN"),
+)
+
+# The service user whose access token the orchestrator drives the account
+# with.  A service user can not log in and the api keeps no email address for
+# it, so its name is all there is to identify it by.
+netbird::User(
+    api=api,
+    name="inmanta",
+    role="admin",
+    is_service_user=true,
+)
+
+# The two groups the account is expressed in terms of: the peers routing
+# towards the office lan, and the peers allowed to reach it.  Their `peers` are
+# left null, so the model does not manage the membership — the peers get there
+# by registering with a setup key whose auto groups name these groups.
+gateways = netbird::Group(
+    api=api,
+    name="office-gateways",
+)
+clients = netbird::Group(
+    api=api,
+    name="office-clients",
+)
+
+# The network holding what the gateways give access to.  A netbird network is
+# nothing but that container: the addresses and the routers are objects of
+# their own, addressed under its id.
+network = netbird::Network(
+    api=api,
+    name="office",
+    description="The office lan, reached through the gateways",
+)
+
+# What the network gives access to, and who may reach it.  The api derives the
+# type of a resource from its address — a host address, a subnet or a domain —
+# so there is no type to set here.
+netbird::NetworkResource(
+    api=api,
+    _network=network.id,
+    name="office-lan",
+    address="10.10.0.0/24",
+    enabled=true,
+    groups=[clients.id],
+    # A reference is not a dependency of its own: the api refuses a resource in
+    # a network that does not exist, and silently drops a group id it does not
+    # know.
+    requires=[network, clients],
+)
+
+# And who routes the traffic there: the peers of the gateway group rather than
+# one named peer.  Exactly one of `peer` and `peer_groups` may be set, the api
+# refuses a router with neither and a router with both.
+netbird::NetworkRouter(
+    api=api,
+    _network=network.id,
+    # The api gives a router no name, it only knows it by what it routes for.
+    # This one identifies the resource inmanta deploys, nothing else.
+    _name="office-gateways",
+    peer_groups=[gateways.id],
+    metric=9999,
+    masquerade=true,
+    enabled=true,
+    requires=[network, gateways],
+)
+
+# The zone that gives the addresses of that subnet names, resolved by the peers
+# of the client group.  Its domain is what identifies it, and the api refuses a
+# change to it once the zone exists.
+zone = netbird::DnsZone(
+    api=api,
+    domain="office.example.com",
+    name="office",
+    enabled=true,
+    # The domain is pushed to the peers as a search domain, so that they
+    # resolve the names of the zone unqualified as well.
+    enable_search_domain=true,
+    distribution_groups=[clients.id],
+    requires=clients,
+)
+
+# The records of that zone.  A record name is fully qualified inside the domain
+# of its zone, without a trailing dot, and the api validates the content
+# against the type: an address for an A record, a target name for a CNAME.
+netbird::DnsZoneRecord(
+    api=api,
+    _zone=zone.id,
+    name="printer.office.example.com",
+    type="A",
+    content="10.10.0.9",
+    ttl=300,
+    requires=zone,
+)
+netbird::DnsZoneRecord(
+    api=api,
+    _zone=zone.id,
+    name="scanner.office.example.com",
+    type="CNAME",
+    content="printer.office.example.com",
+    ttl=300,
+    requires=zone,
+)
+
+```
+
+</x-example-netbird-network>
+
 Find more examples in the `tests` folder of this module!
 
 ## Development
