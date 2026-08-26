@@ -37,6 +37,9 @@ And the following resources, one per object of the api:
 10. `netbird::DnsZone`: a dns zone the account serves, resolved by the peers it is
     distributed to.
 11. `netbird::DnsZoneRecord`: a record held by one of those zones.
+12. `netbird::Policy`: an access policy of the account — who reaches whom, and over
+    what.  Its rule is a `netbird::PolicyRule` entity embedded in it, not a resource of
+    its own: the api holds the rules of a policy in a list and keeps one of them.
 
 Every netbird object is co-managed with whoever else edits the account: an attribute
 left `null` in the model keeps the value the api currently holds, only the values the
@@ -290,11 +293,12 @@ is a reference on the fact the other resource publishes, resolved on the agent a
 time.  The `requires` next to them are not redundant — a reference is not a dependency,
 and the api refuses a resource in a network that does not exist yet.
 
-Which peers may reach the subnet is decided elsewhere: netbird grants that with a policy
-from the group of the peers to the group of the resource, and a policy is not a resource
-of this module yet — the test creates it through the api.  That is also why the resource
-gets a group of its own: the groups of a network resource are what a policy points at,
-they are not the peers reaching it.
+Routing the subnet is not the same as being allowed to reach it: the `netbird::Policy`
+is what the traffic goes through, from the group of the peers to the group of the
+resource.  Nothing reaches a network resource without one — the account's own `Default`
+policy only covers the peers of its `All` group, and a resource is in no group but the
+ones it was given, which is why the resource gets a group of its own here.  The test
+makes that point by purging the policy at the end: the route stays, and the pings stop.
 
 The router routes for a group rather than for a named peer: `peer` and `peer_groups` are
 mutually exclusive, and exactly one of them has to be set.  Going through a group means
@@ -379,9 +383,8 @@ network = netbird::Network(
 
 # What the network gives access to.  The api derives the type of a resource
 # from its address — a host address, a subnet or a domain — so there is no type
-# to set here.  Which peers may reach it is decided by a policy from their group
-# to the group of the resource, and a policy is not a resource of this module
-# yet.
+# to set here.  Its groups are what the policy below points at, they are not the
+# peers reaching it.
 netbird::NetworkResource(
     api=api,
     _network=network.id,
@@ -410,6 +413,28 @@ netbird::NetworkRouter(
     masquerade=true,
     enabled=true,
     requires=[network, gateways],
+)
+
+# Routing the subnet is not the same as being allowed to reach it: a peer
+# reaches the office lan because this policy says the peers of the client group
+# may.  Nothing reaches a network resource without one — the account's own
+# `Default` policy only covers the peers of its `All` group, and a resource is
+# in no group but the ones it was given.
+netbird::Policy(
+    api=api,
+    name="office",
+    enabled=true,
+    rule=netbird::PolicyRule(
+        sources=[clients.id],
+        destinations=[lan.id],
+        # A rule needs a protocol and an action to be created at all, and the
+        # api refuses ports on an `all` rule.
+        protocol="all",
+        action="accept",
+        bidirectional=true,
+        enabled=true,
+    ),
+    requires=[clients, lan],
 )
 
 # The zone that gives the addresses of that subnet names, resolved by the peers

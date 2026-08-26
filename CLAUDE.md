@@ -132,7 +132,8 @@ Two hooks to override:
 - A listing endpoint with nothing to list can answer json `null` instead of `[]` —
   `process_netbird_response` turns that into `[]` for a `list[...]` expected type.
 - A fresh account already has an `All` group and a `Default` policy.  The api refuses to
-  rename it (422) or to delete it (400).
+  rename the group (422) or to delete it (400).  The policy is not protected at all: it
+  can be renamed, disabled and deleted like any other.
 - `GET /api/groups` reports `peers` as a list of `{id, name}` objects, but `POST`/`PUT`
   only take a list of peer ids and answer 400 on the shape the api returned itself.  An
   empty `peers`/`resources` comes back as json `null`, not `[]`, and a peer id the
@@ -199,6 +200,33 @@ Two hooks to override:
   part of the account, so purging `netbird::DnsSettings` fails the deploy.
 - Two primary nameserver groups on one account are accepted, the api enforces nothing
   there.
+- **A policy keeps one rule.**  `POST`/`PUT /api/policies` take a `rules` list, echo back
+  every entry they were given, and store the first one only — the next `GET` reports a
+  single rule.  Hence `netbird::PolicyRule` is one embedded entity at the `rule` key
+  (`index PolicyRule(parent)`, no key attribute, which `get_relative_path` turns into a
+  plain `InDict` path), and the handler nests it back into the one-entry list on the way
+  out.
+- `POST /api/policies` requires a `name` (422 "policy name shouldn't be empty") and a
+  non-empty `rules` (422 "policy rules shouldn't be empty"), and every rule an `action`
+  (422 "unknown action type") and a `protocol` (422 "unknown protocol type: ").  The
+  `PUT` requires the rules just as much, so a policy update always carries the whole
+  rule — a `PUT {"name": ...}` alone is a 422, not a rename.  `enabled` defaults to
+  false on the policy and on its rule.
+- A rule points at groups or at a network resource, and the api refuses **both keys
+  present**: `destinations: []` next to a `destinationResource` is still 422 "specify
+  either destinations or  destination resources, not both" (two spaces, theirs).  Hence
+  `exclusive_targets`: the groups win when the model names any, the resource the account
+  holds is carried along when it doesn't.  Note the two resource keys are the only
+  camelCase ones in the whole api, `destination_resource` is silently ignored.
+- `ports` are strings, refused on an `all` or an `icmp` rule ("for all or icmp protocol
+  ports is not allowed") and refused next to `port_ranges` ("specify either individual
+  ports or port ranges, not both").  Port ranges are not modelled for that reason.
+- A rule's `id` is the id of its policy, not an id of its own, so it identifies nothing.
+  A rule name is optional and stored as `""` when left out.  Two policies may share a
+  name; `find_policy` takes the first.
+- Policy rules report `sources`/`destinations` as `{id, name, peers_count,
+  resources_count}` objects and only take lists of ids — echoing a read body straight
+  back is a 400 "couldn't parse JSON request".
 - `POST /api/dns/zones` requires a `name`, a well formed `domain` and at least one
   distribution group; a second zone on a domain the account serves is a 409, and
   changing the domain of an existing zone a 422 (`zone domain cannot be updated`).  A
@@ -265,10 +293,10 @@ Edit the model in the test, never the readme.  What that exercise turned up:
 - **A network resource is reached only through a policy.**  The fresh account's `Default`
   policy is `All` to `All`, and a resource is in no group but the ones it was given, so
   nothing reaches it until a policy points from the group of the peers to the group of
-  the resource.  There is no `netbird::Policy` resource yet: `grant_access` in
-  `tests/test_example_network.py` posts it to `/api/policies` as scaffolding.  Give the
-  resource a group of its own — its `groups` are policy destinations, not the peers
-  reaching it.
+  the resource.  Give the resource a group of its own — its `groups` are policy
+  destinations, not the peers reaching it.  `tests/test_example_network.py` purges the
+  `netbird::Policy` at the end and watches the pings stop, which is what proves the
+  route alone is not enough.
 - A **routing peer in a container needs `--sysctl net.ipv4.ip_forward=1`**: rootless
   podman mounts `/proc/sys` read only, so the client can not turn forwarding on itself,
   and it routes nothing without saying why.  `masquerade=true` on the router is what makes
