@@ -15,8 +15,25 @@ resource of this module builds upon:
 2. `netbird::ResourceABC`: the base entity for all the resources managed by this module.
 3. `netbird::JsonObjectABC`: the base entity for every object of the netbird api.
 
-And the following resources:
-1. `netbird::User`: a user, or a service user, of the netbird account.
+And the following resources, one per object of the api:
+1. `netbird::User`: a user, or a service user, of the account.
+2. `netbird::Group`: a group of peers, which every access rule of the account is
+   expressed in terms of.
+3. `netbird::SetupKey`: the token a peer registers itself with.  The api generates the
+   key and shows it once, so the model never holds it: it is published as a fact.
+4. `netbird::Peer`: a peer that joined the account.  It can not be created through the
+   api — a peer registers itself — so this resource adopts one and manages what the api
+   lets it change.
+5. `netbird::Network`: a network of the account.
+6. `netbird::NetworkResource`: an address, a subnet or a domain a network gives access
+   to.
+7. `netbird::NetworkRouter`: the peer, or the peers of the groups, routing towards them.
+8. `netbird::NameserverGroup`: a set of dns servers and the peer groups resolving with
+   them.  Its servers are `netbird::Nameserver` entities embedded in it, not a resource
+   of their own.
+9. `netbird::DnsSettings`: the dns settings of the account.  They are a singleton the
+   api creates with the account and has no endpoint to delete, so this resource only
+   ever updates them.
 
 Every netbird object is co-managed with whoever else edits the account: an attribute
 left `null` in the model keeps the value the api currently holds, only the values the
@@ -56,6 +73,14 @@ Two gateways rather than one, because a single peer has nobody to talk to: they 
 same account with the same reusable key, and reach each other over the overlay wherever
 they sit on the underlay.  The test running this example checks exactly that, with each
 client on a network of its own from which there is no path to the other.
+
+The account they join is described by the same model: a group the key drops every peer
+registering with it into, a nameserver group resolving the lab's own domain for the peers
+of that group, and the account's dns settings.  None of it names an id — the key's
+`auto_groups` and the nameserver group's `groups` read `netbird::Group.id`, the reference
+on the fact the group's own resource publishes, and the value is resolved on the agent.
+The group's `peers` are left null on purpose: the peers get there by registering, and
+what the model does not set, it does not manage.
 
 Two things tie it together.  The key is a secret the api only ever shows once, so the
 model never holds the value: it is published as a fact when the key is created, and only
@@ -118,6 +143,14 @@ hostnames = ["lab-gateway-a", "lab-gateway-b"]
 # running while it is not logged in.
 user = "netbird"
 
+# The group the two gateways end up in.  Its `peers` are left null, so the
+# model does not manage them: the clients join by registering with the key
+# below, which is what the key's auto groups do.
+gateways = netbird::Group(
+    api=api,
+    name="lab-gateways",
+)
+
 # The token both clients register with.  The api generates it and the model
 # never sees the value: it is published as a fact when the key is created.  A
 # reusable key, since more than one client joins with it.
@@ -126,6 +159,37 @@ setup_key = netbird::SetupKey(
     name="lab-gateways",
     type="reusable",
     expires_in=86400,
+    # The id of a group the model never reads either: it is a reference on the
+    # fact the group's own resource publishes.  Every peer registering with
+    # this key lands in that group.
+    auto_groups=[gateways.id],
+    # The api refuses an auto group it doesn't know, so the group has to be
+    # there first.  A reference is not a dependency of its own.
+    requires=gateways,
+)
+
+# The dns the gateways resolve the lab's own domain with.  The api wants one to
+# three servers, at least one group to distribute them to, and either the
+# primary flag or a domain — never both, never neither.
+netbird::NameserverGroup(
+    api=api,
+    name="lab-dns",
+    enabled=true,
+    groups=[gateways.id],
+    domains=["lab.example.com"],
+    nameservers=[
+        netbird::Nameserver(ip="9.9.9.9", ns_type="udp", port=53),
+        netbird::Nameserver(ip="1.1.1.1", ns_type="udp", port=53),
+    ],
+    requires=gateways,
+)
+
+# And netbird resolves for every peer of the account: no group opts out of it.
+# These settings are a singleton the api creates with the account, so this
+# resource only ever updates them — purging it is an error.
+netbird::DnsSettings(
+    api=api,
+    disabled_management_groups=[],
 )
 
 for hostname in hostnames:
