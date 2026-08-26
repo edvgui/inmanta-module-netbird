@@ -32,7 +32,10 @@ from conftest import (
     facts,
     get,
     peer_network,
+    ping,
     run_container,
+    underlay_address,
+    update_example,
     wait_until,
 )
 from test_peer import (
@@ -65,36 +68,6 @@ PEER_CONNECTION_TIMEOUT = 120.0
 ENV_TEMPLATE = """NB_SETUP_KEY={{ setup_key | std.create_fact_reference("key") }}
 NB_MANAGEMENT_URL={{ management_url }}
 """
-
-
-def update_example(name: str, block: str) -> None:
-    """
-    Find the example with the given name in the readme, and make sure the block it
-    shows is the one this test used.  The readme can not drift away from something that
-    works that way.
-    """
-    readme_file = pathlib.Path(__file__).parent.parent / "README.md"
-    readme = readme_file.read_text()
-
-    marker_start = f"<x-example-{name}>"
-    start = readme.find(marker_start)
-    if start == -1:
-        raise RuntimeError(
-            f"Can not find marker {marker_start} in readme {readme_file}"
-        )
-
-    marker_end = f"</x-example-{name}>"
-    end = readme.find(marker_end, start)
-    if end == -1:
-        raise RuntimeError(f"Can not find marker {marker_end} in readme {readme_file}")
-
-    current = readme[start : end + len(marker_end)]
-    desired = marker_start + "\n\n```\n" + block + "\n```\n\n" + marker_end
-
-    if current != desired:
-        readme_file.write_text(
-            readme[:start] + desired + readme[end + len(marker_end) :]
-        )
 
 
 @contextlib.contextmanager
@@ -151,42 +124,6 @@ def netbird_client(
         yield container
     finally:
         subprocess.run(["podman", "rm", "-f", container], capture_output=True)
-
-
-def underlay_address(container: str) -> str:
-    """
-    The address of a container on its bridge network — the underlay, as opposed to the
-    address netbird gives the peer.
-    """
-    inspected = subprocess.run(
-        [
-            "podman",
-            "inspect",
-            "--format",
-            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
-            container,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if inspected.returncode != 0:
-        raise RuntimeError(
-            f"podman inspect {container} failed ({inspected.returncode}): "
-            f"{inspected.stderr.strip()}"
-        )
-    return inspected.stdout.strip()
-
-
-def ping(container: str, address: str) -> bool:
-    """
-    Send two pings from within a container, and report whether they were answered.
-    """
-    sent = subprocess.run(
-        ["podman", "exec", container, "ping", "-c", "2", "-W", "3", address],
-        capture_output=True,
-        text=True,
-    )
-    return sent.returncode == 0
 
 
 def client_model(

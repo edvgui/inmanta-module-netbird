@@ -384,3 +384,96 @@ def facts(project: pytest_inmanta.plugin.Project) -> dict[str, str]:
     The facts the last deploy published, by name.
     """
     return {fact["id"]: fact["value"] for fact in project.ctx.facts}
+
+
+def underlay_address(container: str) -> str:
+    """
+    The address of a container on its bridge network — the underlay, as opposed to the
+    address netbird gives the peer.
+    """
+    inspected = subprocess.run(
+        [
+            "podman",
+            "inspect",
+            "--format",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            container,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if inspected.returncode != 0:
+        raise RuntimeError(
+            f"podman inspect {container} failed ({inspected.returncode}): "
+            f"{inspected.stderr.strip()}"
+        )
+    return inspected.stdout.strip()
+
+
+def network_subnet(network: str) -> str:
+    """
+    The subnet of a podman bridge network, in cidr notation.  It is the address range
+    the containers on that network sit in, and therefore what a netbird network
+    resource has to name for the peers elsewhere on the account to reach them.
+    """
+    inspected = subprocess.run(
+        [
+            "podman",
+            "network",
+            "inspect",
+            "--format",
+            "{{range .Subnets}}{{.Subnet}}{{end}}",
+            network,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if inspected.returncode != 0:
+        raise RuntimeError(
+            f"podman network inspect {network} failed ({inspected.returncode}): "
+            f"{inspected.stderr.strip()}"
+        )
+    return inspected.stdout.strip()
+
+
+def ping(container: str, target: str) -> bool:
+    """
+    Send two pings from within a container, and report whether they were answered.  The
+    target is an address or a name, so this is a dns check as much as a routing one.
+    """
+    sent = subprocess.run(
+        ["podman", "exec", container, "ping", "-c", "2", "-W", "3", target],
+        capture_output=True,
+        text=True,
+    )
+    return sent.returncode == 0
+
+
+def update_example(name: str, block: str) -> None:
+    """
+    Find the example with the given name in the readme, and make sure the block it
+    shows is the one this test used.  The readme can not drift away from something that
+    works that way.
+    """
+    readme_file = pathlib.Path(__file__).parent.parent / "README.md"
+    readme = readme_file.read_text()
+
+    marker_start = f"<x-example-{name}>"
+    start = readme.find(marker_start)
+    if start == -1:
+        raise RuntimeError(
+            f"Can not find marker {marker_start} in readme {readme_file}"
+        )
+
+    marker_end = f"</x-example-{name}>"
+    end = readme.find(marker_end, start)
+    if end == -1:
+        raise RuntimeError(f"Can not find marker {marker_end} in readme {readme_file}")
+
+    current = readme[start : end + len(marker_end)]
+    desired = marker_start + "\n\n```\n" + block + "\n```\n\n" + marker_end
+
+    if current != desired:
+        readme_file.write_text(
+            readme[:start] + desired + readme[end + len(marker_end) :]
+        )

@@ -11,6 +11,8 @@
 - Manage the nameserver groups of a netbird account with the
   `netbird::NameserverGroup` resource, and its dns settings with the
   `netbird::DnsSettings` resource
+- Manage the dns zones of a netbird account with the `netbird::DnsZone` resource, and
+  the records they hold with the `netbird::DnsZoneRecord` resource
 
 ## v0.1.0 - 2026-08-11
 
