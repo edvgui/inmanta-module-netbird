@@ -1482,3 +1482,181 @@ class DnsZoneRecordHandler(HandlerABC[DnsZoneRecordResource]):
             ),
         )
         ctx.set_purged()
+
+
+def find_policy(session: Session, name: str) -> dict | None:
+    """
+    Find a policy of the account by its name, and return None if it doesn't exist.
+    The api takes several policies with the same name, and has no endpoint to look one
+    up by anything but its id: this returns the first one the listing holds under that
+    name, which is the one this module manages.
+    """
+    policies = process_netbird_response(
+        session.get(url="policies"),
+        expected_type=list[dict],
+    )
+    return next((p for p in policies if p["name"] == name), None)
+
+
+# The keys of the policy object itself the api takes, next to the rules it requires on
+# every call — a PUT without them answers 422 "policy rules shouldn't be empty".  The
+# create and the update endpoint take the same ones, and both replace the whole policy:
+# a key left out is written as its zero value.
+POLICY_KEYS = ("name", "description", "enabled")
+
+# The keys of the rule the api takes.  The resource targets are carried along but never
+# set by the model: the api refuses a rule holding a group target and a resource target
+# at once, so ``exclusive_targets`` keeps one of each pair.
+POLICY_RULE_KEYS = (
+    "name",
+    "description",
+    "enabled",
+    "sources",
+    "destinations",
+    "sourceResource",
+    "destinationResource",
+    "bidirectional",
+    "protocol",
+    "ports",
+    "action",
+)
+
+# The key the handler keeps the single rule of a policy under, which is where the
+# desired state of the embedded netbird::PolicyRule entity lands.  The api holds the
+# rules in a list and keeps one entry of it.
+POLICY_RULE = "rule"
+
+# The pairs of keys the api refuses to be given together, and the group key of each
+# pair — the one the model can set.  Having the key in the body is what it refuses, an
+# empty list next to a resource target is rejected just the same.
+POLICY_RULE_TARGETS = (
+    ("sources", "sourceResource"),
+    ("destinations", "destinationResource"),
+)
+
+
+def exclusive_targets(rule: dict) -> dict:
+    """
+    Keep one of every pair of targets the api refuses together: the groups when there
+    are any, and the network resource the account holds otherwise.
+
+    :param rule: The rule to narrow down, which is modified in place.
+    """
+    for groups, resource in POLICY_RULE_TARGETS:
+        if rule.get(groups):
+            rule.pop(resource, None)
+        elif rule.get(resource):
+            rule.pop(groups, None)
+
+    return rule
+
+
+@inmanta.resources.resource("netbird::Policy", "name", "api.agent_name")
+class PolicyResource(ResourceABC):
+    fields = ("name",)
+    name: str
+
+
+@inmanta.agent.handler.provider("netbird::Policy", "")
+class PolicyHandler(HandlerABC[PolicyResource]):
+    def diff_body(self, body: dict) -> dict:
+        # Only the keys the api takes on a write take part in the diff, and the rule is
+        # narrowed down the same way: the ids the api handed out to the policy and to
+        # its rule are not something the handler could enforce a change to.
+        return {
+            **select(body, POLICY_KEYS),
+            POLICY_RULE: select(body.get(POLICY_RULE) or {}, POLICY_RULE_KEYS),
+        }
+
+    def normalize(self, body: dict) -> dict:
+        # The api holds the rules of a policy in a list and keeps one entry of it.  The
+        # desired state of the model's single rule lands under `rule`, so the read body
+        # is brought to that shape rather than the other way round: there is no path
+        # the model could address the first entry of a list with.
+        if "rules" in body:
+            rules = body.pop("rules") or []
+            body[POLICY_RULE] = rules[0] if rules else {}
+
+        rule = body.get(POLICY_RULE)
+        if rule is not None:
+            # The api reports the groups of a rule as objects and only takes their
+            # ids, and reports an empty one as a json null.  They are sets here: the
+            # api keeps them in the order it was given them, the model has no opinion
+            # about it.
+            for key in ("sources", "destinations"):
+                if key in rule:
+                    rule[key] = sorted(
+                        group["id"] if isinstance(group, dict) else group
+                        for group in rule[key] or []
+                    )
+
+            if "ports" in rule:
+                rule["ports"] = sorted(rule["ports"] or [])
+
+            body[POLICY_RULE] = exclusive_targets(rule)
+
+        return body
+
+    def api_body(self, body: dict) -> dict:
+        """
+        The policy as the api takes it: the rule the handler keeps flat, back in the
+        one-entry list both endpoints require.
+
+        :param body: The policy in the shape ``normalize`` puts it in.
+        """
+        return {
+            **select(body, POLICY_KEYS),
+            "rules": [select(body.get(POLICY_RULE) or {}, POLICY_RULE_KEYS)],
+        }
+
+    def read_resource(
+        self, ctx: inmanta.agent.handler.HandlerContext, resource: PolicyResource
+    ) -> None:
+        policy = find_policy(self.session, resource.name)
+        if policy is None:
+            raise inmanta.agent.handler.ResourcePurged()
+
+        ctx.set("ID", policy["id"])
+        self.publish_ids(ctx, id=policy["id"])
+
+        resource.body = self.normalize(policy)
+
+    def create_resource(
+        self, ctx: inmanta.agent.handler.HandlerContext, resource: PolicyResource
+    ) -> None:
+        # The api requires a name, a rule, and on that rule an action, a protocol and
+        # either groups or a network resource on both ends.
+        policy = process_netbird_response(
+            self.session.post(
+                url="policies",
+                json=self.api_body(self.merged_body({}, resource)),
+            ),
+            expected_type=dict,
+        )
+        self.publish_ids(ctx, id=policy["id"])
+        ctx.set_created()
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: PolicyResource,
+    ) -> None:
+        # The update replaces the whole policy and validates it as a whole, rule
+        # included, whatever it is that changed.  The body calculate_diff merged is the
+        # complete object.
+        process_netbird_response(
+            self.session.put(
+                url=f"policies/{ctx.get('ID')}",
+                json=self.api_body(resource.body),
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self, ctx: inmanta.agent.handler.HandlerContext, resource: PolicyResource
+    ) -> None:
+        process_netbird_response(
+            self.session.delete(url=f"policies/{ctx.get('ID')}"),
+        )
+        ctx.set_purged()

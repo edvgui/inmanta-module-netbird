@@ -591,3 +591,117 @@ end
 index DnsZoneRecord(api, name, type)
 
 implement DnsZoneRecord using parents
+
+
+typedef policy_action_t as string matching self in ["accept", "drop"]
+"""
+What a policy rule does with the traffic it matches.
+"""
+
+
+typedef policy_protocol_t as string matching self in ["all", "tcp", "udp", "icmp"]
+"""
+The protocols a policy rule can be written for.  The api requires the value on every
+rule and rejects the rule without it (`unknown protocol type: `), and it refuses ports
+on the two that have none (`all` and `icmp`).
+"""
+
+
+entity PolicyRule extends files::json::SerializableEntity:
+    """
+    The rule of a policy: who may reach whom, and over what.
+
+    The api holds the rules of a policy as a list, but keeps **one**: a second entry is
+    accepted, echoed back by the create, and gone by the next read.  So this is a
+    single embedded entity rather than a list of them, serialized at the `rule` key of
+    the policy, which the handler nests back into the one-entry list the api takes.
+
+    Only group to group rules are managed here.  A rule may point at a network resource
+    instead of a group, and the api refuses to be given both — the key being present is
+    enough, an empty list next to it is still rejected — so the handler sends exactly
+    one of the two: the groups when the model names any, and whatever the account holds
+    otherwise.  A rule pointing at a network resource is therefore left alone until the
+    model names a group for it, and rewritten when it does.
+
+    :attr sources: The ids of the groups whose peers the rule applies to.  The api
+        requires either these or a source resource, and silently drops a group id it
+        does not know.
+    :attr destinations: The ids of the groups the rule gives access to.  The api
+        requires either these or a destination resource.
+    :attr protocol: The protocol the rule is written for.  The api requires it to
+        create a rule.
+    :attr action: What happens to the traffic the rule matches.  The api requires it to
+        create a rule (`unknown action type` without).
+    :attr bidirectional: Whether the destinations may reach the sources as well.
+    :attr ports: The ports the rule applies to, as strings.  The api refuses them on an
+        `all` or an `icmp` rule, and refuses them next to a port range — port ranges
+        are not modelled here, so a rule that needs one is not this module's business.
+    :attr name: The name of the rule, which the api stores but identifies nothing: the
+        rule of a policy carries the id of its policy, and a rule the model doesn't
+        name is stored with an empty one.
+    :attr description: The description of the rule.
+    :attr enabled: Whether the rule is applied.  It is not the same value as the
+        `enabled` of the policy holding it, and the api defaults neither to true.
+    """
+    string[]? sources = null
+    string[]? destinations = null
+    policy_protocol_t? protocol = null
+    policy_action_t? action = null
+    bool? bidirectional = null
+    string[]? ports = null
+    string? name = null
+    string? description = null
+    bool? enabled = null
+end
+
+
+entity Policy extends JsonObjectABC:
+    """
+    Manage an access policy of the netbird account.
+
+    Api documentation: https://docs.netbird.io/api/resources/policies
+
+    A policy is what makes anything reachable: the peers of a group reach the peers of
+    another one, or a network resource, because a policy says so.  A fresh account
+    holds one, `Default`, allowing everything between the peers of its `All` group —
+    and nothing else, a network resource being in no group but the ones it was given.
+
+    The api takes several policies with the same name, and this resource addresses one
+    by name all the same: it is the only thing the model can point at, the ids being
+    opaque.  Every attribute left null is not managed, and keeps whatever value the
+    account holds for it.
+
+    :attr name: The name of the policy, which is what identifies it here.
+    :attr description: The description of the policy.
+    :attr enabled: Whether the policy is applied.  The api does not default it to true:
+        a policy created without it is created disabled.
+    """
+    string name
+    string? description = null
+    bool? enabled = null
+end
+
+Policy.rule [0:1] -- PolicyRule.parent [1]
+"""
+The rule of the policy.  Optional, like every other value: a policy whose rule the
+model doesn't declare keeps the rule the account holds, and only the values named on
+the policy itself are managed.  A policy that doesn't exist yet does need one, the api
+refuses to create a policy without.
+
+This relation is two-way on purpose, unlike the ones between two api objects: the
+serializer derives the path of an embedded entity from the relation leading back to its
+parent.
+"""
+
+index PolicyRule(parent)
+"""
+One rule per policy, which is all the api keeps.  An index on the parent alone is what
+makes the rule serialize as the single `rule` object of the policy rather than as an
+entry of a list.
+"""
+
+implement PolicyRule using parents
+
+index Policy(api, name)
+
+implement Policy using parents

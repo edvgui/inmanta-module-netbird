@@ -54,6 +54,7 @@ SERVICE_USER = "inmanta"
 NETWORK_NAME = "office"
 NETWORK_RESOURCE_NAME = "office-lan"
 ROUTER_NAME = "office-gateways"
+POLICY_NAME = "office"
 
 ZONE_DOMAIN = "office.example.com"
 PRINTER_RECORD = f"printer.{ZONE_DOMAIN}"
@@ -161,48 +162,26 @@ def office_host(network: str) -> collections.abc.Iterator[str]:
         subprocess.run(["podman", "rm", "-f", container], capture_output=True)
 
 
-def grant_access(netbird: requests.Session, source: str, destination: str) -> None:
-    """
-    Let the peers of one group reach whatever is in another one, by creating a policy
-    on the account.
-
-    This is scaffolding, not part of the example: a netbird network resource is reached
-    by the peers a policy allows, and the fresh account's own ``Default`` policy only
-    covers the peers of the ``All`` group — a resource is in no group but the ones it
-    was given.  There is no ``netbird::Policy`` resource yet, so the test creates the
-    policy through the api.
-    """
-    created = netbird.post(
-        f"{netbird.base_url}/policies",
-        json={
-            "name": "office",
-            "enabled": True,
-            "rules": [
-                {
-                    "name": "office",
-                    "enabled": True,
-                    "sources": [source],
-                    "destinations": [destination],
-                    "bidirectional": True,
-                    "protocol": "all",
-                    "action": "accept",
-                }
-            ],
-        },
-    )
-    created.raise_for_status()
-
-
-def network_model(management_url: str, subnet: str, printer_address: str) -> str:
+def network_model(
+    management_url: str,
+    subnet: str,
+    printer_address: str,
+    *,
+    policy_purged: bool = False,
+) -> str:
     """
     The model the readme shows, with the values the test needs to deploy it for real
     substituted in: the api it drives, the subnet podman gave the office bridge, and
     the address of the host standing in for the printer on it.
 
+    :param policy_purged: Whether the policy is asked to be gone, which the test uses
+        to show that it is the policy the traffic goes through.
+
     Nothing in it names a netbird id: every object pointing at another one reads the
     ``id`` of the resource managing it, which is a reference on the fact that resource
     publishes and is resolved on the agent, at deploy time.
     """
+    purged = "\n            purged=true," if policy_purged else ""
     return f"""
         import netbird
         import std
@@ -279,9 +258,8 @@ def network_model(management_url: str, subnet: str, printer_address: str) -> str
 
         # What the network gives access to.  The api derives the type of a resource
         # from its address — a host address, a subnet or a domain — so there is no type
-        # to set here.  Which peers may reach it is decided by a policy from their group
-        # to the group of the resource, and a policy is not a resource of this module
-        # yet.
+        # to set here.  Its groups are what the policy below points at, they are not the
+        # peers reaching it.
         netbird::NetworkResource(
             api=api,
             _network=network.id,
@@ -310,6 +288,28 @@ def network_model(management_url: str, subnet: str, printer_address: str) -> str
             masquerade=true,
             enabled=true,
             requires=[network, gateways],
+        )
+
+        # Routing the subnet is not the same as being allowed to reach it: a peer
+        # reaches the office lan because this policy says the peers of the client group
+        # may.  Nothing reaches a network resource without one — the account's own
+        # `Default` policy only covers the peers of its `All` group, and a resource is
+        # in no group but the ones it was given.
+        netbird::Policy(
+            api=api,
+            name="{POLICY_NAME}",
+            enabled=true,{purged}
+            rule=netbird::PolicyRule(
+                sources=[clients.id],
+                destinations=[lan.id],
+                # A rule needs a protocol and an action to be created at all, and the
+                # api refuses ports on an `all` rule.
+                protocol="all",
+                action="accept",
+                bidirectional=true,
+                enabled=true,
+            ),
+            requires=[clients, lan],
         )
 
         # The zone that gives the addresses of that subnet names, resolved by the peers
@@ -472,8 +472,20 @@ def test_netbird_network(
             assert routers[0]["masquerade"] is True
             assert routers[0]["metric"] == 9999
 
-            # The policy the peers of the client group reach the office lan under.
-            grant_access(netbird, group_ids[CLIENT_GROUP], group_ids[LAN_GROUP])
+            # And the policy the peers of the client group reach it under.  Without
+            # it the route is there and nothing goes through.
+            project.deploy_resource("netbird::Policy")
+            policy = next(
+                p for p in get(netbird, "policies") if p["name"] == POLICY_NAME
+            )
+            assert policy["enabled"] is True
+            (policy_rule,) = policy["rules"]
+            assert [g["id"] for g in policy_rule["sources"]] == [
+                group_ids[CLIENT_GROUP]
+            ]
+            assert [g["id"] for g in policy_rule["destinations"]] == [
+                group_ids[LAN_GROUP]
+            ]
 
             # And the client reaches the printer, through the gateway: the packets go
             # over the overlay to a peer on the office bridge, which forwards them to a
@@ -521,6 +533,37 @@ def test_netbird_network(
                     timeout=ROUTE_TIMEOUT,
                 )
 
+            # And the policy is what the traffic goes through: purge it and the
+            # route is still there, with nothing going over it any more.
+            project.compile(
+                network_model(
+                    netbird.management_url,
+                    subnet,
+                    printer_address,
+                    policy_purged=True,
+                ),
+                no_dedent=False,
+            )
+            project.deploy_resource("netbird::Policy")
+            assert (
+                next(
+                    (p for p in get(netbird, "policies") if p["name"] == POLICY_NAME),
+                    None,
+                )
+                is None
+            )
+            wait_until(
+                lambda: not ping(client, printer_address),
+                client,
+                "the client still reaches the printer without a policy allowing it",
+                timeout=ROUTE_TIMEOUT,
+            )
+
+    # The readme shows the model the example is about, not the variant that purges the
+    # policy to prove a point: compile it once more, so that what is written back is it.
+    project.compile(
+        network_model(netbird.management_url, subnet, printer_address), no_dedent=False
+    )
     tested_model = pathlib.Path(project._test_project_dir, "main.cf").read_text()
     tested_model = tested_model.replace(
         netbird.management_url, "https://api.netbird.io"
