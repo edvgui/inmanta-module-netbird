@@ -232,6 +232,11 @@ Two hooks to override:
   changing the domain of an existing zone a 422 (`zone domain cannot be updated`).  A
   zone `PUT` ignores the `records` key and leaves the records of the zone alone, so a
   zone update can not clobber the `netbird::DnsZoneRecord`s under it.
+- **Since netbird 0.78.0 a dns zone record change never reaches the connected peers**
+  (issue #30, upstream netbirdio/netbird#7722): the push runs on the canceled request
+  context and gives up.  The peers get it on their next login, which is why
+  `tests/test_example_network.py` restarts the client after deploying the records.
+  Re-sending the distribution group, even with a membership change, does not push it.
 - The dns zones live under `/api/dns/zones`, not `/api/dns-zones` (404), records under
   `/api/dns/zones/{zone}/records`.  `GET` on the records of a zone the account does not
   hold answers `200 []`, not 404, while `POST` into it answers 404: a record pointed at
