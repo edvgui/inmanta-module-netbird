@@ -522,6 +522,19 @@ def test_netbird_network(
             assert records[SCANNER_RECORD]["type"] == "CNAME"
             assert records[SCANNER_RECORD]["content"] == PRINTER_RECORD
 
+            # Since netbird 0.78.0 the server never pushes a record to the peers that
+            # are already connected, they only get it on their next full sync
+            # (https://github.com/edvgui/inmanta-module-netbird/issues/30).  Restart
+            # the client: its login is one.
+            restarted = subprocess.run(
+                ["podman", "restart", client], capture_output=True, text=True
+            )
+            if restarted.returncode != 0:
+                raise RuntimeError(
+                    f"podman restart {client} failed ({restarted.returncode}): "
+                    f"{restarted.stderr.strip()}"
+                )
+
             # The client resolves both names with the account's dns and reaches the
             # printer by either: the A record it was given, and the CNAME pointing at
             # it.
