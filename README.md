@@ -40,6 +40,9 @@ And the following resources, one per object of the api:
 12. `netbird::Policy`: an access policy of the account — who reaches whom, and over
     what.  Its rule is a `netbird::PolicyRule` entity embedded in it, not a resource of
     its own: the api holds the rules of a policy in a list and keeps one of them.
+13. `netbird::AccountSettings`: the network settings of the account — the dns domain of
+    its peers, the ranges their overlay addresses come from, and who gets an ipv6 one.
+    Like the dns settings, they always exist and are only ever updated.
 
 Every netbird object is co-managed with whoever else edits the account: an attribute
 left `null` in the model keeps the value the api currently holds, only the values the

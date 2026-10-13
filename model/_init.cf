@@ -506,6 +506,48 @@ index DnsSettings(api)
 implement DnsSettings using parents
 
 
+entity AccountSettings extends JsonObjectABC:
+    """
+    Manage the network settings of the netbird account: the ones the dashboard shows
+    under Settings > Networks.
+
+    Api documentation: https://docs.netbird.io/api/resources/accounts
+
+    These settings are part of the account itself: they always exist, they can not be
+    created and the api has no endpoint to delete them.  The resource only ever updates
+    them, and purging it fails the deploy rather than pretending to have done something.
+    The account holds more settings than the ones modelled here, which this resource
+    keeps as they are: the api only takes the settings back whole, so they are all
+    written back on every update.
+
+    `id` is the id of the account the settings belong to.
+
+    :attr dns_domain: The dns domain the peers of the account are named under.  It
+        should not be a domain that resolves publicly, the peers would resolve it with
+        netbird rather than with its real servers.  A fresh account holds an empty one.
+    :attr network_range: The ipv4 range, in cidr notation, the peers get their overlay
+        address from.  Changing it re-allocates the address of every peer.  The api
+        clears the host bits of the range: `10.128.0.5/24` is stored as `10.128.0.0/24`.
+    :attr network_range_v6: The ipv6 range, in cidr notation, the peers get their ipv6
+        overlay address from.  Changing it re-allocates the ipv6 address of every peer.
+    :attr ipv6_enabled_groups: The ids of the groups whose peers get an ipv6 overlay
+        address next to their ipv4 one.  An empty list disables ipv6 on the account.
+        The api refuses a group id it does not know.
+    :attr routing_peer_dns_resolution_enabled: Whether the routing peers resolve the
+        domains of the network resources they route for, rather than the clients.
+    """
+    string? dns_domain = null
+    string? network_range = null
+    string? network_range_v6 = null
+    string[]? ipv6_enabled_groups = null
+    bool? routing_peer_dns_resolution_enabled = null
+end
+
+index AccountSettings(api)
+
+implement AccountSettings using parents
+
+
 entity DnsZone extends JsonObjectABC:
     """
     Manage a dns zone of the netbird account.

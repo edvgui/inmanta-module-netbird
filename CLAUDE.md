@@ -200,6 +200,16 @@ Two hooks to override:
   part of the account, so purging `netbird::DnsSettings` fails the deploy.
 - Two primary nameserver groups on one account are accepted, the api enforces nothing
   there.
+- The account settings live on the account: `GET /api/accounts` lists the one account
+  the token belongs to, `PUT /api/accounts/{id}` takes `{"settings": {...}}` and
+  **replaces** every setting — a key left out is its zero value, and a zero
+  `peer_login_expiration` is a 422.  Echoing the read settings back whole is accepted,
+  computed keys and `extra` included; `onboarding` can be left out.  The `PUT` response
+  reports `embedded_idp_enabled: false` whatever the account holds, the next `GET` is
+  right.  Ranges get their host bits cleared (`10.0.0.5/24` stored as `10.0.0.0/24`),
+  an ipv6 range in `network_range` is a 422, and so is an unknown
+  `ipv6_enabled_groups` id.  An empty `network_range`/`network_range_v6` keeps the
+  current one.
 - **A policy keeps one rule.**  `POST`/`PUT /api/policies` take a `rules` list, echo back
   every entry they were given, and store the first one only — the next `GET` reports a
   single rule.  Hence `netbird::PolicyRule` is one embedded entity at the `rule` key
