@@ -1248,6 +1248,105 @@ class DnsSettingsHandler(HandlerABC[DnsSettingsResource]):
         )
 
 
+# The settings whose value is a range of addresses.  The api clears the host bits of a
+# range before it stores it, so a range the model writes with host bits set has to be
+# compared in the shape the api reports, or it never converges.
+ACCOUNT_SETTINGS_RANGES = ("network_range", "network_range_v6")
+
+
+@inmanta.resources.resource("netbird::AccountSettings", "agent_name", "api.agent_name")
+class AccountSettingsResource(ResourceABC):
+    # The settings are part of the account, they have no identity of their own: the
+    # agent managing the api is what tells two of them apart.
+    fields = ("agent_name",)
+    agent_name: str
+
+    @classmethod
+    def get_agent_name(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity.api.agent_name
+
+
+@inmanta.agent.handler.provider("netbird::AccountSettings", "")
+class AccountSettingsHandler(HandlerABC[AccountSettingsResource]):
+    def normalize(self, body: dict) -> dict:
+        for key in ACCOUNT_SETTINGS_RANGES:
+            if body.get(key):
+                try:
+                    body[key] = str(ipaddress.ip_network(body[key], strict=False))
+                except ValueError:
+                    # Not a range at all, which the api refuses with a reason of its own
+                    pass
+
+        # The groups are a set here, and the api reports none as a json null when that
+        # is what it was given rather than an empty list.
+        if "ipv6_enabled_groups" in body:
+            body["ipv6_enabled_groups"] = sorted(body["ipv6_enabled_groups"] or [])
+
+        return body
+
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: AccountSettingsResource,
+    ) -> None:
+        # A token belongs to a single account, the listing holds that one only.  The
+        # settings of an account always exist, so this never reports the resource as
+        # purged: there is only ever an update to do.
+        accounts = process_netbird_response(
+            self.session.get(url="accounts"),
+            expected_type=list[dict],
+        )
+        if len(accounts) != 1:
+            raise RuntimeError(
+                f"Expected the token to give access to one account, got {len(accounts)}"
+            )
+
+        ctx.set("ID", accounts[0]["id"])
+        self.publish_ids(ctx, id=accounts[0]["id"])
+
+        resource.body = self.normalize(accounts[0]["settings"])
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: AccountSettingsResource,
+    ) -> None:
+        raise RuntimeError(
+            "The settings of a netbird account always exist, they can not be created"
+        )
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: AccountSettingsResource,
+    ) -> None:
+        # The update replaces every setting of the account: one left out of the body is
+        # written as its zero value, which the api even refuses for some of them ("peer
+        # login expiration can't be smaller than one hour").  The body calculate_diff
+        # merged holds every setting the account has, the ones this module doesn't
+        # model included.
+        process_netbird_response(
+            self.session.put(
+                url=f"accounts/{ctx.get('ID')}",
+                json={"settings": resource.body},
+            ),
+        )
+        ctx.set_updated()
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: AccountSettingsResource,
+    ) -> None:
+        raise RuntimeError(
+            "The settings of a netbird account can not be deleted, this resource "
+            "should not be purged"
+        )
+
+
 # The keys of the zone object the api takes.  It takes the same ones on a create and
 # on an update, and it requires the name, the domain and the distribution groups on
 # both.  The domain can not be changed once the zone exists, but it still has to be
