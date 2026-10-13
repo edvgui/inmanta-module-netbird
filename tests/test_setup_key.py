@@ -92,7 +92,6 @@ def test_setup_key_created_revoked_and_purged(
     # on the deploy that created them.  The listing reports the key masked, so the fact
     # is the only place the value a peer can register with is kept.
     published = facts(project)
-    assert set(published) == {"id", "key"}
     assert published["id"] == setup_key["id"]
     assert "*" not in published["key"]
     assert published["key"].startswith(setup_key["key"].rstrip("*"))
@@ -103,12 +102,13 @@ def test_setup_key_created_revoked_and_purged(
 
     # A second deploy of the same desired state changes nothing.  It goes through the
     # read, which sees the key masked: republishing it there would replace a usable
-    # key with `ABCDE****`, so the read publishes the id alone.
+    # key with `ABCDE****`, so the read publishes everything but the key.
     compile_model(
         setup_key_model(type="reusable", expires_in=SETUP_KEY_EXPIRY, usage_limit=3)
     )
     project.deploy_resource("netbird::SetupKey", change=const.Change.nochange)
-    assert facts(project) == {"id": setup_key["id"]}
+    assert facts(project)["id"] == setup_key["id"]
+    assert "key" not in facts(project)
 
     # Revoking is the one change the api takes on an existing key.
     compile_model(setup_key_model(revoked=True))
@@ -116,6 +116,9 @@ def test_setup_key_created_revoked_and_purged(
     revoked = find_setup_key(netbird, SETUP_KEY_NAME)
     assert revoked["revoked"] is True
     assert revoked["valid"] is False
+    # The facts are the values the key holds after the update, not before it.
+    assert facts(project)["revoked"] == "true"
+    assert facts(project)["valid"] == "false"
 
     # And it only goes that way: the api refuses to un-revoke a key, so a model asking
     # for it is a failed deploy rather than something silently ignored.

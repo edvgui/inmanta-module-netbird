@@ -49,6 +49,12 @@ entity ResourceABC extends std::PurgeableResource, std::ManagedResource, files::
         it is a reference that is resolved from the facts the handler publishes, at
         the moment the value is needed on the agent.  Point another resource at this
         object with it, rather than going digging through the api.
+
+    The id is not the only fact: every value the api reports about the object is
+    published as a fact under its own key, whether the model manages it or not, with
+    the value the object holds once the deploy is done.  A string is published as it
+    is, anything else json encoded.  Point at one of them with
+    `std::create_fact_reference(<resource>, "<key>")`.
     """
     bool send_event = true
     bool serialize = false

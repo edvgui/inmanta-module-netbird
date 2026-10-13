@@ -149,7 +149,7 @@ def test_peer_adopted_updated_and_purged(
     updated = find_peer(netbird, hostname)
     assert updated is not None
     # The id the api gave the peer is published.
-    assert facts(project) == {"id": peer["id"]}
+    assert facts(project)["id"] == peer["id"]
     assert updated["name"] == "managed"
     assert updated["ssh_enabled"] is True
 

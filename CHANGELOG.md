@@ -16,6 +16,8 @@
 - Manage the access policies of a netbird account with the `netbird::Policy` resource
 - Manage the network settings of a netbird account with the `netbird::AccountSettings`
   resource
+- Publish every value the api reports about an object as a fact of its resource, the
+  ones the model doesn't manage included, so that the model can reference them
 
 ## v0.1.0 - 2026-08-11
 

@@ -18,6 +18,7 @@ Contact: edvgui@gmail.com
 
 import copy
 import ipaddress
+import json
 import typing
 from dataclasses import asdict
 
@@ -30,6 +31,7 @@ import inmanta.execute.proxy
 import inmanta.export
 import inmanta.plugins
 import inmanta.resources
+from inmanta import const
 from inmanta.util import dict_path
 from inmanta_plugins.netbird.helpers import Session
 
@@ -193,19 +195,33 @@ class HandlerABC(inmanta.agent.handler.CRUDHandler[NR]):
         self.session = self.get_session(resource.management_url, resource.api_token)
         self.session.logger = ctx
 
-    def publish_ids(
-        self, ctx: inmanta.agent.handler.HandlerContext, **ids: str
+    def post(self, ctx: inmanta.agent.handler.HandlerContext, resource: NR) -> None:
+        if ctx.change in (const.Change.created, const.Change.updated):
+            # The facts the read published before the write are the values the
+            # account held then, or nothing at all on a create.  Reading the object
+            # again publishes the ones it holds now.
+            self.read_resource(ctx, resource.clone())
+
+    def publish_facts(
+        self, ctx: inmanta.agent.handler.HandlerContext, body: dict
     ) -> None:
         """
-        Publish the identifiers the handler resolved on the api as facts.  The api
-        addresses every object by an opaque id, which the model never knows: exposing
-        them makes it possible to point at an object from outside the model without
-        going digging through the api.
+        Publish every value of an object as a fact, under its key, whether the model
+        manages it or not.  The api addresses every object by an opaque id, and holds
+        values the model leaves alone or never knew: exposing them lets the model point
+        at them, with ``std::create_fact_reference``, without going digging through
+        the api.
 
-        :param ids: The identifiers to publish, by fact name.
+        A fact is a string, so a value that is not one is published json encoded.
+
+        :param body: The object, as the read put it in its canonical shape.
         """
-        for name, value in ids.items():
-            ctx.set_fact(name, value, expires=False)
+        for name, value in body.items():
+            ctx.set_fact(
+                name,
+                value if isinstance(value, str) else json.dumps(value),
+                expires=False,
+            )
 
     def normalize(self, body: dict) -> dict:
         """
@@ -329,9 +345,8 @@ class UserHandler(HandlerABC[UserResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", user["id"])
-        self.publish_ids(ctx, id=user["id"])
-
         resource.body = self.normalize(user)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
@@ -343,7 +358,6 @@ class UserHandler(HandlerABC[UserResource]):
             self.session.post(url="users", json=select(desired, USER_CREATE_KEYS)),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=user["id"])
         ctx.set_created()
 
         if desired.get("is_blocked"):
@@ -431,23 +445,21 @@ class GroupHandler(HandlerABC[GroupResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", group["id"])
-        self.publish_ids(ctx, id=group["id"])
-
         resource.body = self.normalize(group)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: GroupResource,
     ) -> None:
-        group = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url="groups",
                 json=select(self.merged_body({}, resource), GROUP_KEYS),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=group["id"])
         ctx.set_created()
 
     def update_resource(
@@ -543,12 +555,11 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", setup_key["id"])
-        # Only the id is published here.  The api reports the key masked
-        # (``ABCDE****``) on every read, and publishing that would overwrite the fact
-        # the create left behind with a value nothing can register a peer with.
-        self.publish_ids(ctx, id=setup_key["id"])
-
         resource.body = self.normalize(setup_key)
+        # Everything but the key itself is published here.  The api reports the key
+        # masked (``ABCDE****``) on every read, and publishing that would overwrite the
+        # fact the create left behind with a value nothing can register a peer with.
+        self.publish_facts(ctx, {k: v for k, v in resource.body.items() if k != "key"})
 
     def create_resource(
         self,
@@ -563,7 +574,6 @@ class SetupKeyHandler(HandlerABC[SetupKeyResource]):
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=setup_key["id"])
         # This response is the only place the api ever shows the generated key in
         # clear, it is masked everywhere else.  So it is published here and nowhere
         # else, which is what ``netbird::SetupKey._key`` resolves.  The fact does not
@@ -668,9 +678,8 @@ class PeerHandler(HandlerABC[PeerResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", peer["id"])
-        self.publish_ids(ctx, id=peer["id"])
-
         resource.body = self.normalize(peer)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
@@ -753,23 +762,21 @@ class NetworkHandler(HandlerABC[Network]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", network["id"])
-        self.publish_ids(ctx, id=network["id"])
-
         resource.body = self.normalize(network)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: Network,
     ) -> None:
-        network = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url="networks",
                 json=select(self.merged_body({}, resource), NETWORK_KEYS),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=network["id"])
         ctx.set_created()
 
     def update_resource(
@@ -867,23 +874,21 @@ class NetworkResourceHandler(HandlerABC[NetworkResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", current["id"])
-        self.publish_ids(ctx, id=current["id"])
-
         resource.body = self.normalize(current)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: NetworkResource,
     ) -> None:
-        current = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url=f"networks/{resource.network}/resources",
                 json=select(self.merged_body({}, resource), NETWORK_RESOURCE_KEYS),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=current["id"])
         ctx.set_created()
 
     def update_resource(
@@ -991,23 +996,21 @@ class NetworkRouterHandler(HandlerABC[NetworkRouter]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", router["id"])
-        self.publish_ids(ctx, id=router["id"])
-
         resource.body = self.normalize(router)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: NetworkRouter,
     ) -> None:
-        router = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url=f"networks/{resource.network}/routers",
                 json=select(self.merged_body({}, resource), NETWORK_ROUTER_KEYS),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=router["id"])
         ctx.set_created()
 
     def update_resource(
@@ -1116,23 +1119,21 @@ class NameserverGroupHandler(HandlerABC[NameserverGroupResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", group["id"])
-        self.publish_ids(ctx, id=group["id"])
-
         resource.body = self.normalize(group)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: NameserverGroupResource,
     ) -> None:
-        group = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url="dns/nameservers",
                 json=select(self.merged_body({}, resource), NAMESERVER_GROUP_KEYS),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=group["id"])
         ctx.set_created()
 
     def update_resource(
@@ -1212,6 +1213,7 @@ class DnsSettingsHandler(HandlerABC[DnsSettingsResource]):
                 expected_type=dict,
             )
         )
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
@@ -1304,9 +1306,8 @@ class AccountSettingsHandler(HandlerABC[AccountSettingsResource]):
             )
 
         ctx.set("ID", accounts[0]["id"])
-        self.publish_ids(ctx, id=accounts[0]["id"])
-
         resource.body = self.normalize(accounts[0]["settings"])
+        self.publish_facts(ctx, {"id": accounts[0]["id"], **resource.body})
 
     def create_resource(
         self,
@@ -1405,23 +1406,21 @@ class DnsZoneHandler(HandlerABC[DnsZoneResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", zone["id"])
-        self.publish_ids(ctx, id=zone["id"])
-
         resource.body = self.normalize(zone)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: DnsZoneResource,
     ) -> None:
-        zone = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url="dns/zones",
                 json=select(self.merged_body({}, resource), ZONE_KEYS),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=zone["id"])
         ctx.set_created()
 
     def update_resource(
@@ -1535,23 +1534,21 @@ class DnsZoneRecordHandler(HandlerABC[DnsZoneRecordResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", record["id"])
-        self.publish_ids(ctx, id=record["id"])
-
         resource.body = self.normalize(record)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
         resource: DnsZoneRecordResource,
     ) -> None:
-        record = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url=f"dns/zones/{resource.zone}/records",
                 json=select(self.merged_body({}, resource), RECORD_KEYS),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=record["id"])
         ctx.set_created()
 
     def update_resource(
@@ -1716,23 +1713,21 @@ class PolicyHandler(HandlerABC[PolicyResource]):
             raise inmanta.agent.handler.ResourcePurged()
 
         ctx.set("ID", policy["id"])
-        self.publish_ids(ctx, id=policy["id"])
-
         resource.body = self.normalize(policy)
+        self.publish_facts(ctx, resource.body)
 
     def create_resource(
         self, ctx: inmanta.agent.handler.HandlerContext, resource: PolicyResource
     ) -> None:
         # The api requires a name, a rule, and on that rule an action, a protocol and
         # either groups or a network resource on both ends.
-        policy = process_netbird_response(
+        process_netbird_response(
             self.session.post(
                 url="policies",
                 json=self.api_body(self.merged_body({}, resource)),
             ),
             expected_type=dict,
         )
-        self.publish_ids(ctx, id=policy["id"])
         ctx.set_created()
 
     def update_resource(

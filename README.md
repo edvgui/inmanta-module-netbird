@@ -49,7 +49,11 @@ left `null` in the model keeps the value the api currently holds, only the value
 model sets are enforced.  The api addresses its objects by opaque ids, and so does
 this module: `netbird::ResourceABC.id` is a reference resolving the id of an object
 from the facts its resource publishes, to be fed to whatever other resource points at
-it.
+it.  The id is not the only fact: every value the api reports about an object is
+published under its own key, managed by the model or not, so that a value the model
+leaves alone can be referenced all the same, e.g.
+`std::create_fact_reference(settings, "network_range")`.  A string is published as it
+is, anything else json encoded.
 
 ## Example
 
