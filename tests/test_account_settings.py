@@ -91,7 +91,7 @@ def test_account_settings_updated(
     project.deploy_resource("netbird::AccountSettings")
 
     after = account(netbird)
-    assert facts(project) == {"id": before["id"]}
+    assert facts(project)["id"] == before["id"]
     assert after["settings"]["dns_domain"] == "ni.example.com"
     assert after["settings"]["network_range"] == "10.128.0.0/24"
     assert after["settings"]["network_range_v6"] == "fd79:3cbf:152c:a3e0::/64"
@@ -151,3 +151,46 @@ def test_account_settings_can_not_be_purged(
         "netbird::AccountSettings", status=const.ResourceState.failed
     )
     assert account(netbird)["settings"] == before
+
+
+def test_account_settings_published_as_facts(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    Every setting the account holds is published as a fact, the ones the model leaves
+    null included, so that another resource can point at a setting the model does not
+    manage.
+    """
+    before = account(netbird)
+
+    compile_model(account_settings_model(dns_domain="ni.example.com"))
+    resource = project.deploy_resource("netbird::AccountSettings")
+
+    published = facts(project)
+    assert published["id"] == before["id"]
+    # The value the deploy wrote, not the one the account held before it.
+    assert published["dns_domain"] == "ni.example.com"
+    # A string is published as it is, anything else json encoded.
+    assert published["network_range"] == before["settings"]["network_range"]
+    assert published["peer_login_expiration"] == json.dumps(
+        before["settings"]["peer_login_expiration"]
+    )
+
+    # The test runner only knows about a fact once it put it there itself, before the
+    # compile that builds the reference.
+    project.add_fact(
+        resource.id.resource_str(), "network_range", published["network_range"]
+    )
+    compile_model(
+        account_settings_model(dns_domain="ni.example.com")
+        + "\nnetbird::Network(\n"
+        + "    api=api,\n"
+        + '    name="overlay",\n'
+        + '    description=std::create_fact_reference(settings, "network_range"),\n'
+        + ")\n"
+    )
+    project.deploy_resource("netbird::Network")
+    (network,) = get(netbird, "networks")
+    assert network["description"] == before["settings"]["network_range"]

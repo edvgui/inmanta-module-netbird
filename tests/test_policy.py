@@ -122,7 +122,7 @@ def test_policy_created_updated_and_purged(
     assert policy is not None
     # The id the api gave the policy is published, already on the deploy that created
     # it.
-    assert facts(project) == {"id": policy["id"]}
+    assert facts(project)["id"] == policy["id"]
     assert policy["enabled"] is True
 
     rule = rule_of(policy)

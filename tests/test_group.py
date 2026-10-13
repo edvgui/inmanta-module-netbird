@@ -71,7 +71,7 @@ def test_group_created_and_purged(
     assert group is not None
     # The id the api gave the group is published, already on the deploy that
     # created it.
-    assert facts(project) == {"id": group["id"]}
+    assert facts(project)["id"] == group["id"]
     # An empty collection comes back as a json null rather than an empty list.
     assert group["peers"] is None
     assert group["peers_count"] == 0

@@ -56,8 +56,14 @@ at another object carries **the id**, and the handler does no name↔id translat
 reading the `id` fact its resource publishes, so one resource feeds another
 (`auto_groups=[some_group.id]`) without the model ever knowing the value.
 
-Every handler publishes that fact on **both** the read and the create path — a create
-that didn't publish would leave the reference unresolvable until the next repair.
+**Every key of the object is a fact**, not only `id`: `read_resource` ends with
+`self.publish_facts(ctx, resource.body)`, which publishes each top-level key of the
+normalized body (a string as is, anything else `json.dumps`ed), managed by the model or
+not.  That is what lets a model reference a value it doesn't manage
+(`std::create_fact_reference(settings, "network_range")`).  `HandlerABC.post` reads the
+object again after a create or an update, so the facts are the values the account holds
+*after* the write — the create path publishes nothing itself, and a create that the read
+can't find back leaves the facts unpublished (logged as an error in `post`).
 
 **pytest-inmanta does resolve a fact reference at deploy time**: `project.deploy` calls
 `resource.resolve_all_references(ctx)` before the handler runs, so `resource.zone` is a
@@ -152,9 +158,8 @@ Two hooks to override:
 - The api never echoes `expires_in` back, it reports the `expires` timestamp — hence
   create-only and out of `diff_body`.  `key` is in clear in the create response and
   masked (`ABCDE****`) on every read, so its fact is published on the create path
-  **only**: the read would clobber it with the mask.  That is the one exception to
-  "publish the fact on both paths", and it means a key this module adopted rather than
-  created has no `key` fact at all.
+  **only**, and the read publishes every key but that one: it would clobber it with the
+  mask.  A key this module adopted rather than created has no `key` fact at all.
 - A setup key's `auto_groups` come back in the order they were sent, and as `[]` when
   empty (no json `null` here).  The account's `All` group is refused (422 "can't add
   'all' group to the setup key"), and so is an unknown group id — unlike a group's

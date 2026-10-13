@@ -145,7 +145,7 @@ def test_network_created_updated_and_purged(
     assert network is not None
     # The id the api gave the network is published, already on the deploy that
     # created it.
-    assert facts(project) == {"id": network["id"]}
+    assert facts(project)["id"] == network["id"]
     assert network["description"] == "The office network"
 
     # A second deploy of the same desired state changes nothing: the routers, the
@@ -188,7 +188,7 @@ def test_network_resource_created_updated_and_purged(
     project.deploy_resource("netbird::NetworkResource")
 
     (resource,) = resources()
-    assert facts(project) == {"id": resource["id"]}
+    assert facts(project)["id"] == resource["id"]
     assert resource["name"] == RESOURCE_NAME
     # The api stores a host address as the network it is alone in
     assert resource["address"] == "10.0.0.1/32"
@@ -253,7 +253,7 @@ def test_network_router_created_updated_and_purged(
     project.deploy_resource("netbird::NetworkRouter")
 
     (router,) = routers()
-    assert facts(project) == {"id": router["id"]}
+    assert facts(project)["id"] == router["id"]
     assert router["peer_groups"] == [all_group]
     assert router["metric"] == 100
     assert router["masquerade"] is True
@@ -314,7 +314,7 @@ def test_network_router_for_a_peer(
     project.deploy_resource("netbird::NetworkRouter")
 
     (router,) = routers()
-    assert facts(project) == {"id": router["id"]}
+    assert facts(project)["id"] == router["id"]
     assert router["peer"] == peer["id"]
     # The api reports the half of the pair the router doesn't use as an empty value
     assert router["peer_groups"] is None

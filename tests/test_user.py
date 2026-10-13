@@ -77,7 +77,7 @@ def test_user_created_updated_and_purged(
     assert user is not None
     # The id the api gave the user is published, already on the deploy that
     # created it.
-    assert facts(project) == {"id": user["id"]}
+    assert facts(project)["id"] == user["id"]
     assert user["email"] == USER_EMAIL
     assert user["role"] == "user"
     assert user["is_blocked"] is False

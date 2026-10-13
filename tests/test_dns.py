@@ -125,7 +125,7 @@ def test_nameserver_group_created_updated_and_purged(
     assert group is not None
     # The id the api gave the group is published, already on the deploy that
     # created it.
-    assert facts(project) == {"id": group["id"]}
+    assert facts(project)["id"] == group["id"]
     assert group["nameservers"] == [QUAD9]
     assert group["groups"] == [all_group]
     assert group["primary"] is True

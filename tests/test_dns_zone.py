@@ -139,7 +139,7 @@ def test_zone_created_updated_and_purged(
     assert zone is not None
     # The id the api gave the zone is published, already on the deploy that created
     # it.
-    assert facts(project) == {"id": zone["id"]}
+    assert facts(project)["id"] == zone["id"]
     assert zone["name"] == ZONE_NAME
     assert zone["distribution_groups"] == [all_group]
     assert zone["enabled"] is True
@@ -272,7 +272,7 @@ def test_record_created_updated_and_purged(
     assert record["ttl"] == 300
     # The id the api gave the record is published, already on the deploy that
     # created it.
-    assert facts(project) == {"id": record["id"]}
+    assert facts(project)["id"] == record["id"]
 
     # A second deploy of the same desired state changes nothing.
     compile_model(
