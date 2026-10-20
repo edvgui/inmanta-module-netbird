@@ -13,7 +13,8 @@
   `netbird::DnsSettings` resource
 - Manage the dns zones of a netbird account with the `netbird::DnsZone` resource, and
   the records they hold with the `netbird::DnsZoneRecord` resource
-- Manage the access policies of a netbird account with the `netbird::Policy` resource
+- Manage the access policies of a netbird account with the `netbird::Policy` resource,
+  whose rule points at groups, at a network resource or at a peer
 - Manage the network settings of a netbird account with the `netbird::AccountSettings`
   resource
 - Publish every value the api reports about an object as a fact of its resource, the

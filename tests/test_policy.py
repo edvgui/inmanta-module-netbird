@@ -19,10 +19,12 @@ Contact: edvgui@gmail.com
 import collections.abc
 import json
 
+import pytest
 import pytest_inmanta.plugin
 import requests
 from conftest import DEFAULT_GROUP, facts, get
 
+import inmanta.ast
 from inmanta import const
 
 POLICY_NAME = "lab"
@@ -65,6 +67,26 @@ def group_ids(rule: dict, key: str) -> list[str]:
     return sorted(group["id"] for group in rule[key] or [])
 
 
+# The ends of a rule that point at a resource, and the entity each of them takes.
+RESOURCE_TARGETS = {
+    "sourceResource": "netbird::PolicyRuleSourceResource",
+    "destinationResource": "netbird::PolicyRuleDestinationResource",
+}
+
+
+def dsl_value(key: str, value: object) -> str:
+    """
+    The dsl for a value of a rule: json, but for a resource target, which is an
+    embedded entity of its own.
+    """
+    if key in RESOURCE_TARGETS:
+        assert isinstance(value, dict)
+        attrs = ", ".join(f"{k}={json.dumps(v)}" for k, v in value.items())
+        return f"{RESOURCE_TARGETS[key]}({attrs})"
+
+    return json.dumps(value)
+
+
 def policy_model(*, rule: dict | None = None, **attributes: object) -> str:
     """
     Build a policy resource, with only the attributes the test has an opinion about:
@@ -77,7 +99,7 @@ def policy_model(*, rule: dict | None = None, **attributes: object) -> str:
     values a netbird object is made of.
     """
     attrs = ", ".join(
-        f"{key}={json.dumps(value)}" for key, value in (rule or {}).items()
+        f"{key}={dsl_value(key, value)}" for key, value in (rule or {}).items()
     )
     return "\n".join(
         [
@@ -273,6 +295,17 @@ def test_attributes_left_null_are_not_managed(
     assert rule_of(enforced)["name"] == "named in the dashboard"
 
 
+def create_network_resource(netbird: requests.Session, all_group: str) -> dict:
+    network = netbird.post(f"{netbird.base_url}/networks", json={"name": "lab"})
+    network.raise_for_status()
+    resource = netbird.post(
+        f"{netbird.base_url}/networks/{network.json()['id']}/resources",
+        json={"name": "lab-lan", "address": "10.10.0.0/24", "groups": [all_group]},
+    )
+    resource.raise_for_status()
+    return resource.json()
+
+
 def test_a_rule_pointing_at_a_network_resource(
     project: pytest_inmanta.plugin.Project,
     compile_model: Compile,
@@ -283,19 +316,13 @@ def test_a_rule_pointing_at_a_network_resource(
     to be given both: having the group key in the body is enough, an empty list next to
     a resource is rejected just the same.
 
-    So a policy whose rule points at a resource is left alone by a model that names no
-    group for that end, and rewritten by one that does.
+    So the target the model names for an end replaces the one the account holds,
+    whichever kind that is, and an end the model names nothing for is left alone.
     """
     all_group = group_id(netbird, DEFAULT_GROUP)
     clients = create_group(netbird, SOURCE_GROUP)
-
-    network = netbird.post(f"{netbird.base_url}/networks", json={"name": "lab"})
-    network.raise_for_status()
-    resource = netbird.post(
-        f"{netbird.base_url}/networks/{network.json()['id']}/resources",
-        json={"name": "lab-lan", "address": "10.10.0.0/24", "groups": [all_group]},
-    )
-    resource.raise_for_status()
+    resource = create_network_resource(netbird, all_group)
+    target = {"id": resource["id"], "type": resource["type"]}
 
     created = netbird.post(
         f"{netbird.base_url}/policies",
@@ -307,10 +334,7 @@ def test_a_rule_pointing_at_a_network_resource(
                     "name": "lab",
                     "enabled": True,
                     "sources": [clients],
-                    "destinationResource": {
-                        "id": resource.json()["id"],
-                        "type": "subnet",
-                    },
+                    "destinationResource": target,
                     "protocol": "all",
                     "bidirectional": True,
                     "action": "accept",
@@ -329,24 +353,116 @@ def test_a_rule_pointing_at_a_network_resource(
     project.deploy_resource("netbird::Policy", change=const.Change.nochange)
 
     kept = rule_of(find_policy(netbird, POLICY_NAME))
-    assert kept["destinationResource"]["id"] == resource.json()["id"]
+    assert kept["destinationResource"]["id"] == resource["id"]
 
-    # Naming one rewrites the rule: the groups win, and the resource target goes.
-    compile_model(
-        policy_model(
-            rule={
-                "sources": [clients],
-                "destinations": [all_group],
-                "protocol": "all",
-                "action": "accept",
-            }
-        )
-    )
+    # Naming the resource the account already holds adopts the rule as it is.
+    resource_rule = {
+        "sources": [clients],
+        "destinationResource": target,
+        "protocol": "all",
+        "action": "accept",
+    }
+    compile_model(policy_model(rule=resource_rule))
+    project.deploy_resource("netbird::Policy", change=const.Change.nochange)
+
+    # Naming groups rewrites the rule: the groups win, and the resource target goes.
+    group_rule = {
+        "sources": [clients],
+        "destinations": [all_group],
+        "protocol": "all",
+        "action": "accept",
+    }
+    compile_model(policy_model(rule=group_rule))
     project.deploy_resource("netbird::Policy")
 
     rewritten = rule_of(find_policy(netbird, POLICY_NAME))
     assert group_ids(rewritten, "destinations") == [all_group]
     assert rewritten.get("destinationResource") is None
+
+    # And back: the resource the model names replaces the groups the account holds.
+    compile_model(policy_model(rule=resource_rule))
+    project.deploy_resource("netbird::Policy")
+
+    back = rule_of(find_policy(netbird, POLICY_NAME))
+    assert back["destinationResource"] == target
+    assert back["destinations"] is None
+    assert group_ids(back, "sources") == [clients]
+
+    compile_model(policy_model(rule=resource_rule))
+    project.deploy_resource("netbird::Policy", change=const.Change.nochange)
+
+
+def test_a_rule_created_towards_a_network_resource(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+    netbird: requests.Session,
+) -> None:
+    """
+    A rule is created pointing at a network resource of the model, whose id and type
+    are read from the facts its resource publishes.
+    """
+    all_group = group_id(netbird, DEFAULT_GROUP)
+    clients = create_group(netbird, SOURCE_GROUP)
+    resource = create_network_resource(netbird, all_group)
+
+    model = f"""
+        lan = netbird::NetworkResource(
+            api=api,
+            _network={json.dumps(resource["id"])},
+            name={json.dumps(resource["name"])},
+            address={json.dumps(resource["address"])},
+        )
+        policy = netbird::Policy(
+            api=api,
+            name={json.dumps(POLICY_NAME)},
+            rule=netbird::PolicyRule(
+                sources={json.dumps([clients])},
+                destinationResource=netbird::PolicyRuleDestinationResource(
+                    id=lan.id,
+                    type=std::create_fact_reference(lan, "type"),
+                ),
+                protocol="all",
+                action="accept",
+            ),
+        )
+    """
+
+    # The facts of the network resource are seeded before the compile that builds the
+    # references to them, which is the only place the test runner reads them from.
+    compile_model(model)
+    lan = project.get_resource("netbird::NetworkResource")
+    project.add_fact(lan.id.resource_str(), "id", resource["id"])
+    project.add_fact(lan.id.resource_str(), "type", resource["type"])
+
+    compile_model(model)
+    project.deploy_resource("netbird::Policy")
+
+    rule = rule_of(find_policy(netbird, POLICY_NAME))
+    assert rule["destinationResource"] == {"id": resource["id"], "type": "subnet"}
+    assert rule["destinations"] is None
+    assert group_ids(rule, "sources") == [clients]
+
+    compile_model(model)
+    project.deploy_resource("netbird::Policy", change=const.Change.nochange)
+
+
+@pytest.mark.parametrize("end", ["source", "destination"])
+def test_a_rule_naming_groups_and_a_resource_for_one_end(
+    compile_model: Compile, end: str
+) -> None:
+    """
+    The api refuses a rule naming groups and a resource for the same end, so does the
+    model.
+    """
+    with pytest.raises(inmanta.ast.CompilerException, match=f"either {end} groups"):
+        compile_model(
+            policy_model(
+                rule={
+                    f"{end}s": ["some-group"],
+                    f"{end}Resource": {"id": "some-resource", "type": "subnet"},
+                }
+            )
+        )
 
 
 def test_the_default_policy_is_adopted_rather_than_duplicated(

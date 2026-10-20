@@ -1600,9 +1600,8 @@ def find_policy(session: Session, name: str) -> dict | None:
 # a key left out is written as its zero value.
 POLICY_KEYS = ("name", "description", "enabled")
 
-# The keys of the rule the api takes.  The resource targets are carried along but never
-# set by the model: the api refuses a rule holding a group target and a resource target
-# at once, so ``exclusive_targets`` keeps one of each pair.
+# The keys of the rule the api takes.  The api refuses a rule holding a group target
+# and a resource target at once, so ``exclusive_targets`` keeps one of each pair.
 POLICY_RULE_KEYS = (
     "name",
     "description",
@@ -1622,9 +1621,9 @@ POLICY_RULE_KEYS = (
 # rules in a list and keeps one entry of it.
 POLICY_RULE = "rule"
 
-# The pairs of keys the api refuses to be given together, and the group key of each
-# pair — the one the model can set.  Having the key in the body is what it refuses, an
-# empty list next to a resource target is rejected just the same.
+# The pairs of keys the api refuses to be given together, groups first.  Having the key
+# in the body is what it refuses, an empty list next to a resource target is rejected
+# just the same.
 POLICY_RULE_TARGETS = (
     ("sources", "sourceResource"),
     ("destinations", "destinationResource"),
@@ -1692,6 +1691,20 @@ class PolicyHandler(HandlerABC[PolicyResource]):
             body[POLICY_RULE] = exclusive_targets(rule)
 
         return body
+
+    def merged_body(self, current: dict, resource: PolicyResource) -> dict:
+        # The target the model names for an end of the rule replaces the one the
+        # account holds, whichever kind that is: merged together, the body would
+        # hold both, and ``exclusive_targets`` would keep the groups.
+        named = apply_desired_state({}, resource.desired_state).get(POLICY_RULE) or {}
+        current = copy.deepcopy(current)
+        rule = current.get(POLICY_RULE) or {}
+        for pair in POLICY_RULE_TARGETS:
+            if any(key in named for key in pair):
+                for key in pair:
+                    rule.pop(key, None)
+
+        return super().merged_body(current, resource)
 
     def api_body(self, body: dict) -> dict:
         """

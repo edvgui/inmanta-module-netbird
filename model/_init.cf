@@ -664,12 +664,12 @@ entity PolicyRule extends files::json::SerializableEntity:
     single embedded entity rather than a list of them, serialized at the `rule` key of
     the policy, which the handler nests back into the one-entry list the api takes.
 
-    Only group to group rules are managed here.  A rule may point at a network resource
-    instead of a group, and the api refuses to be given both — the key being present is
-    enough, an empty list next to it is still rejected — so the handler sends exactly
-    one of the two: the groups when the model names any, and whatever the account holds
-    otherwise.  A rule pointing at a network resource is therefore left alone until the
-    model names a group for it, and rewritten when it does.
+    Each end of a rule points either at groups or at a single resource — a network
+    resource, or a peer — and the api refuses to be given both: the key being present
+    is enough, an empty list next to a resource is still rejected.  So the model names
+    one of the two per end, and the handler sends only that one, dropping the other
+    kind of target the account holds.  An end the model names neither for keeps the
+    target the account holds, whichever kind it is.
 
     :attr sources: The ids of the groups whose peers the rule applies to.  The api
         requires either these or a source resource, and silently drops a group id it
@@ -749,6 +749,73 @@ entry of a list.
 """
 
 implement PolicyRule using parents
+
+
+entity PolicyRuleResource extends files::json::SerializableEntity:
+    """
+    A single resource one end of a policy rule points at, instead of groups.
+
+    :attr id: The id of the resource: `netbird::NetworkResource.id` or
+        `netbird::Peer.id`.  The api accepts an id the account doesn't know.
+    :attr type: The type of the resource: `peer` for a peer, and for a network
+        resource the type the api derived from its address (`host`, `subnet` or
+        `domain`), which its resource publishes as a fact:
+        `std::create_fact_reference(<network resource>, "type")`.  It is a plain string
+        because a typedef refuses that reference.  The api stores whatever it is given
+        without checking it against the resource, so a wrong one is only found out by
+        the traffic the rule fails to match.
+    """
+    string id
+    string type
+end
+
+implement PolicyRuleResource using parents
+
+
+entity PolicyRuleSourceResource extends PolicyRuleResource:
+    """
+    The resource whose traffic a policy rule applies to.
+    """
+end
+
+PolicyRule.sourceResource [0:1] -- PolicyRuleSourceResource.parent [1]
+
+index PolicyRuleSourceResource(parent)
+
+implement PolicyRuleSourceResource using parents
+
+
+entity PolicyRuleDestinationResource extends PolicyRuleResource:
+    """
+    The resource a policy rule gives access to.
+    """
+end
+
+PolicyRule.destinationResource [0:1] -- PolicyRuleDestinationResource.parent [1]
+"""
+The two resource relations each lead to an entity of their own because the serializer
+needs the relation back to the parent to be named `parent`, and an entity can only have
+one.  They are named after the api keys, the only camel case ones of the whole api.
+"""
+
+index PolicyRuleDestinationResource(parent)
+
+implement PolicyRuleDestinationResource using parents
+
+
+implementation exclusive_targets for PolicyRule:
+    """
+    The api refuses a rule naming groups and a resource for the same end.
+    """
+    if self.sources != null and self.sourceResource is defined:
+        std::assert(false, "A policy rule names either source groups or a source resource, not both")
+    end
+    if self.destinations != null and self.destinationResource is defined:
+        std::assert(false, "A policy rule names either destination groups or a destination resource, not both")
+    end
+end
+
+implement PolicyRule using exclusive_targets
 
 index Policy(api, name)
 
