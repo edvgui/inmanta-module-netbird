@@ -448,20 +448,23 @@ def test_a_rule_created_towards_a_network_resource(
 
 @pytest.mark.parametrize("end", ["source", "destination"])
 def test_a_rule_naming_groups_and_a_resource_for_one_end(
-    compile_model: Compile, end: str
+    project: pytest_inmanta.plugin.Project, end: str
 ) -> None:
     """
     The api refuses a rule naming groups and a resource for the same end, so does the
-    model.
+    model.  The compiler refuses it on its own, no server needed.
     """
+    model = policy_model(
+        rule={
+            f"{end}s": ["some-group"],
+            f"{end}Resource": {"id": "some-resource", "type": "subnet"},
+        }
+    )
     with pytest.raises(inmanta.ast.CompilerException, match=f"either {end} groups"):
-        compile_model(
-            policy_model(
-                rule={
-                    f"{end}s": ["some-group"],
-                    f"{end}Resource": {"id": "some-resource", "type": "subnet"},
-                }
-            )
+        project.compile(
+            "import netbird\n"
+            'api = netbird::Api(agent_name="netbird", '
+            'management_url="http://localhost", api_token="token")\n' + model
         )
 
 
