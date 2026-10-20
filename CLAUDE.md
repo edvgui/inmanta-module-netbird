@@ -230,9 +230,19 @@ Two hooks to override:
 - A rule points at groups or at a network resource, and the api refuses **both keys
   present**: `destinations: []` next to a `destinationResource` is still 422 "specify
   either destinations or  destination resources, not both" (two spaces, theirs).  Hence
-  `exclusive_targets`: the groups win when the model names any, the resource the account
-  holds is carried along when it doesn't.  Note the two resource keys are the only
-  camelCase ones in the whole api, `destination_resource` is silently ignored.
+  `PolicyHandler.merged_body`: the kind of target the model names for an end drops the
+  other kind the account holds before the merge, and `exclusive_targets` (groups win)
+  only settles the read body.  The two resource keys are the only camelCase ones in the
+  whole api, `destination_resource` is silently ignored — the dsl relations carry the
+  camelCase names as they are.
+- A resource target (`{id, type}`) is stored verbatim: an unknown id, a `type` that
+  doesn't match the resource, even an empty one, all answer 200.  A rule targeting groups
+  reports no resource key at all, one targeting a resource reports the groups as `null`.
+- **A typedef refuses a fact reference** (`FactReference ... is not a subtype of
+  Reference[<typedef>]`), so an attribute meant to take one (`PolicyRuleResource.type`)
+  is a plain `string`.  And an entity extending another one with
+  `implement X using parents` needs that parent implemented too, or the compile fails
+  with "Unable to select implementation".
 - `ports` are strings, refused on an `all` or an `icmp` rule ("for all or icmp protocol
   ports is not allowed") and refused next to `port_ranges` ("specify either individual
   ports or port ranges, not both").  Port ranges are not modelled for that reason.
