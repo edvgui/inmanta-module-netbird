@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 - ?
+## v0.2.0 - 2026-10-20
 
 - Manage the groups of a netbird account with the `netbird::Group` resource
 - Manage the setup keys of a netbird account with the `netbird::SetupKey` resource
