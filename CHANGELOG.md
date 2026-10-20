@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.2.1 - ?
+
+
 ## v0.2.0 - 2026-10-20
 
 - Manage the groups of a netbird account with the `netbird::Group` resource
