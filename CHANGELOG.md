@@ -2,6 +2,8 @@
 
 ## v0.2.1 - ?
 
+- Discover the peers of a netbird account, and the users owning them, with the
+  `netbird::PeerDiscovery` resource, which publishes them as its `peers` fact
 
 ## v0.2.0 - 2026-10-20
 

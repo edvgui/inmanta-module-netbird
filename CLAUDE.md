@@ -78,6 +78,13 @@ compile time, and only when the store is non-empty already: seed the fact **befo
 compile that builds the reference.  A reference compiled with nothing seeded falls back to
 a real orchestrator client and fails the deploy with a bare `KeyError: 'data'`.
 
+## Read-only resources
+
+`netbird::PeerDiscovery` manages nothing: it extends `ResourceABC`, not `JsonObjectABC`
+(nothing to serialize, its exporter's `desired_state` is `[]`, so the base
+`calculate_diff` never finds a change), and its read publishes the account's peers, with
+their owner's email joined from the users, as one `peers` fact.  Purging it is a no-op.
+
 ## Adding a resource for another api object
 
 1. **Probe the real api first.**  The docs at `https://docs.netbird.io/api/resources/*`

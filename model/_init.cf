@@ -554,6 +554,33 @@ index AccountSettings(api)
 implement AccountSettings using parents
 
 
+entity PeerDiscovery extends ResourceABC:
+    """
+    Discover the peers of the netbird account, without managing anything: the
+    resource only reads the account, and publishes what it found as the fact
+    `peers`, so a model can map the overlay address of a client back to the peer it
+    belongs to and the user owning that peer.
+
+    Api documentation: https://docs.netbird.io/api/resources/peers and
+    https://docs.netbird.io/api/resources/users
+
+    The fact is a json list, sorted by address, with one object per peer:
+    `id`, `name`, `hostname`, `ip`, `ipv6` (null when the peer has none), `user_id` and
+    `user_email`.  The user is null for a peer registered with a setup key, and the
+    email for a service user, which has none.  Point at it with
+    `std::create_fact_reference(<discovery>, "peers")`.
+
+    The fact is the account as it was when the resource was last deployed: a peer
+    that joins since shows up on the next deploy.  Purging the resource does nothing,
+    there is nothing in the account it owns.
+    """
+end
+
+index PeerDiscovery(api)
+
+implement PeerDiscovery using parents
+
+
 entity DnsZone extends JsonObjectABC:
     """
     Manage a dns zone of the netbird account.

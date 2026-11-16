@@ -1348,6 +1348,98 @@ class AccountSettingsHandler(HandlerABC[AccountSettingsResource]):
         )
 
 
+def discovered_peers(peers: list[dict], users: list[dict]) -> list[dict]:
+    """
+    The peers of the account, as the peer discovery publishes them: what identifies a
+    peer and who owns it, the user's email joined in from the users of the account.
+    Sorted by address, so that the fact only changes when the account does.
+
+    :param peers: The peers, as the api lists them.
+    :param users: The users, regular and service ones, as the api lists them.
+    """
+    emails = {user["id"]: user.get("email") or None for user in users}
+    return sorted(
+        (
+            {
+                "id": peer["id"],
+                "name": peer["name"],
+                "hostname": peer["hostname"],
+                "ip": peer["ip"],
+                "ipv6": peer.get("ipv6") or None,
+                # A peer registered with a setup key has no user
+                "user_id": peer.get("user_id") or None,
+                "user_email": emails.get(peer.get("user_id")),
+            }
+            for peer in peers
+        ),
+        key=lambda peer: ipaddress.ip_address(peer["ip"]),
+    )
+
+
+@inmanta.resources.resource("netbird::PeerDiscovery", "agent_name", "api.agent_name")
+class PeerDiscoveryResource(ResourceABC):
+    # The discovery is about the whole account, the agent managing the api is what
+    # tells two of them apart.
+    fields = ("agent_name",)
+    agent_name: str
+
+    @classmethod
+    def get_agent_name(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity.api.agent_name
+
+    @classmethod
+    def get_desired_state(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> list[dict]:
+        # Nothing is managed: the body read from the api is the desired state as it
+        # is, so there is never a change to make
+        return []
+
+
+@inmanta.agent.handler.provider("netbird::PeerDiscovery", "")
+class PeerDiscoveryHandler(HandlerABC[PeerDiscoveryResource]):
+    def read_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: PeerDiscoveryResource,
+    ) -> None:
+        peers = process_netbird_response(
+            self.session.get(url="peers"),
+            expected_type=list[dict],
+        )
+        users = process_netbird_response(
+            self.session.get(url="users"),
+            expected_type=list[dict],
+        )
+        resource.body = {"peers": discovered_peers(peers, users)}
+        self.publish_facts(ctx, resource.body)
+
+    def create_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: PeerDiscoveryResource,
+    ) -> None:
+        raise RuntimeError("The peer discovery only reads the account")
+
+    def update_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        changes: dict,
+        resource: PeerDiscoveryResource,
+    ) -> None:
+        raise RuntimeError("The peer discovery only reads the account")
+
+    def delete_resource(
+        self,
+        ctx: inmanta.agent.handler.HandlerContext,
+        resource: PeerDiscoveryResource,
+    ) -> None:
+        # It owns nothing in the account: purged, there is nothing to remove
+        pass
+
+
 # The keys of the zone object the api takes.  It takes the same ones on a create and
 # on an update, and it requires the name, the domain and the distribution groups on
 # both.  The domain can not be changed once the zone exists, but it still has to be
