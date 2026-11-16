@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.3.1 - ?
+
+
 ## v0.3.0 - 2026-11-16
 
 - Discover the peers of a netbird account, and the users owning them, with the
