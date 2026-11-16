@@ -19,7 +19,6 @@ Contact: edvgui@gmail.com
 import collections.abc
 import json
 
-import inmanta_plugins.std
 import pytest
 import pytest_inmanta.plugin
 import requests
@@ -387,5 +386,8 @@ def test_record_zone_is_a_fact_reference(
 
     (record,) = project.get_instances("netbird::DnsZoneRecord")
     zone = inmanta.plugins.allow_reference_values(record)._zone
-    assert isinstance(zone, inmanta_plugins.std.FactReference)
+    # Each compile reloads the plugins: the class of this compile
+    from inmanta_plugins.std import FactReference
+
+    assert isinstance(zone, FactReference)
     assert zone.fact_name == "id"
