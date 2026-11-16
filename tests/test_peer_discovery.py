@@ -32,8 +32,8 @@ from inmanta.types import ResourceIdStr
 
 Compile = collections.abc.Callable[[str], None]
 
-MODEL = "discovery = netbird::PeerDiscovery(api=api)"
-DISCOVERY = ResourceIdStr("netbird::PeerDiscovery[netbird,agent_name=netbird]")
+MODEL = 'discovery = netbird::PeerDiscovery(api=api, name="peers")'
+DISCOVERY = ResourceIdStr("netbird::PeerDiscovery[netbird,name=peers]")
 
 
 def reported(
@@ -74,6 +74,8 @@ def test_discovered_peers_join_their_user(
             "ip": "100.64.0.9",
             "ipv6": "fd00::9",
             "user_id": "u-alice",
+            "country_code": "BE",
+            "city_name": "Brussels",
         },
         {"id": "p2", "name": "ci", "hostname": "ci", "ip": "100.64.0.2", "user_id": ""},
         {"id": "p3", "name": "a", "hostname": "pi", "ip": "100.64.0.3", "user_id": ""},
@@ -101,6 +103,8 @@ def test_discovered_peers_join_their_user(
             "ipv6": "fd00::9",
             "user_id": "u-alice",
             "user_email": "alice@example.com",
+            "country_code": "BE",
+            "city_name": "Brussels",
         },
         "netbird::Peer[netbird,hostname=ci]": {
             "id": "p2",
@@ -110,6 +114,8 @@ def test_discovered_peers_join_their_user(
             "ipv6": None,
             "user_id": None,
             "user_email": None,
+            "country_code": None,
+            "city_name": None,
         },
         "netbird::Peer[netbird,id=p3]": {
             "id": "p3",
@@ -119,6 +125,8 @@ def test_discovered_peers_join_their_user(
             "ipv6": None,
             "user_id": None,
             "user_email": None,
+            "country_code": None,
+            "city_name": None,
         },
         "netbird::Peer[netbird,id=p4]": {
             "id": "p4",
@@ -128,6 +136,8 @@ def test_discovered_peers_join_their_user(
             "ipv6": None,
             "user_id": "u-robot",
             "user_email": None,
+            "country_code": None,
+            "city_name": None,
         },
     }
 
@@ -199,7 +209,7 @@ def test_peer_discovery_deletes_the_peers_that_left(
             discovered_by(gone, DISCOVERY),
             discovered_by(
                 ResourceIdStr("netbird::Peer[netbird,hostname=other]"),
-                ResourceIdStr("netbird::PeerDiscovery[other,agent_name=other]"),
+                ResourceIdStr("netbird::PeerDiscovery[netbird,name=other]"),
             ),
         ]
     )
@@ -250,5 +260,27 @@ def test_peer_discovery_reports_the_peers(
             "ipv6": peer.get("ipv6") or None,
             "user_id": None,
             "user_email": None,
+            # Whatever the server could locate, if anything
+            "country_code": peer.get("country_code") or None,
+            "city_name": peer.get("city_name") or None,
         },
     }
+
+
+def test_peer_discovery_agent_name(
+    project: pytest_inmanta.plugin.Project,
+    compile_model: Compile,
+) -> None:
+    """
+    The peers are discovered on the agent of the api, unless the discovery picks
+    another one.  The discovery itself always runs on the agent of the api.
+    """
+    compile_model(
+        MODEL + '\nnetbird::PeerDiscovery(api=api, name="other", agent_name="site")'
+    )
+    default = project.get_resource("netbird::PeerDiscovery", name="peers")
+    other = project.get_resource("netbird::PeerDiscovery", name="other")
+    assert default is not None and other is not None
+    assert default.agent_name == "netbird"
+    assert other.agent_name == "site"
+    assert other.id.resource_str() == "netbird::PeerDiscovery[netbird,name=other]"

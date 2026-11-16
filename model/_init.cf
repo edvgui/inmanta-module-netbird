@@ -565,14 +565,22 @@ entity PeerDiscovery extends std::DiscoveryResource:
 
     A peer is reported under the id of the netbird::Peer resource that would manage it,
     netbird::Peer[<agent>,hostname=<hostname>], when no other peer has the same hostname,
-    and as netbird::Peer[<agent>,id=<id>] otherwise.  Its values are `id`, `name`,
-    `hostname`, `ip`, `ipv6` (null when the peer has none), `user_id` and `user_email`:
-    the user is null for a peer registered with a setup key, and the email for a service
-    user, which has none.
+    and as netbird::Peer[<agent>,id=<id>] otherwise, <agent> being `agent_name`.  Its values are `id`, `name`,
+    `hostname`, `ip`, `ipv6` (null when the peer has none), `user_id`, `user_email`,
+    `country_code` and `city_name`: the user is null for a peer registered with a setup
+    key, and the email for a service user, which has none; the location is where the
+    management server placed the address the peer connects from, null without a
+    geolocation database.
 
     The discovered peers are the account as it was at the last deploy: a peer that joins
     since shows up on the next one.
+
+    :attr name: The name of the discovery, which identifies it on the api.
+    :attr agent_name: The agent of the discovered peers, the one in their id.  Null for
+        the agent of the api, the agent of the netbird::Peer resources it manages.
     """
+    string name
+    string? agent_name = null
 end
 
 PeerDiscovery.api [1] -- Api
@@ -580,7 +588,7 @@ PeerDiscovery.api [1] -- Api
 The api whose account the peers are discovered in.
 """
 
-index PeerDiscovery(api)
+index PeerDiscovery(api, name)
 
 implement PeerDiscovery using std::none
 

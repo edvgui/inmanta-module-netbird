@@ -1384,6 +1384,10 @@ class DiscoveredPeer(BaseModel):
     ipv6: str | None
     user_id: str | None
     user_email: str | None
+    # Where the management server located the peer, from the address it connects from,
+    # None when it has no geolocation database
+    country_code: str | None
+    city_name: str | None
 
 
 def discovered_peers(
@@ -1400,7 +1404,7 @@ def discovered_peers(
     (netbird::Peer[<agent>,id=<id>]): the api keeps no hostname unique, and a hostname
     two peers share identifies neither.
 
-    :param agent_name: The agent of the api, the agent of the peer resources.
+    :param agent_name: The agent of the discovered peers.
     :param peers: The peers, as the api lists them.
     :param users: The users, regular and service ones, as the api lists them.
     """
@@ -1429,23 +1433,27 @@ def discovered_peers(
             # A peer registered with a setup key has no user
             user_id=peer.get("user_id") or None,
             user_email=emails.get(peer.get("user_id")),
+            country_code=peer.get("country_code") or None,
+            city_name=peer.get("city_name") or None,
         )
 
     return discovered
 
 
-@inmanta.resources.resource("netbird::PeerDiscovery", "agent_name", "api.agent_name")
+@inmanta.resources.resource("netbird::PeerDiscovery", "name", "api.agent_name")
 class PeerDiscoveryResource(ApiResource, inmanta.resources.DiscoveryResource):
-    # The discovery is about the whole account, the agent managing the api is what
-    # tells two of them apart.
-    fields: tuple[str, ...] = ("agent_name",)  # type: ignore[assignment]
+    fields: tuple[str, ...] = ("name", "agent_name")  # type: ignore[assignment]
+    name: str
+    # The agent of the discovered peers
     agent_name: str
 
     @classmethod
     def get_agent_name(
         cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
     ) -> str:
-        return entity.api.agent_name
+        if entity.agent_name is None:
+            return entity.api.agent_name
+        return entity.agent_name
 
 
 # Core only types its provider decorator for resource handlers, it registers any handler
@@ -1471,7 +1479,7 @@ class PeerDiscoveryHandler(
             self.session.get(url="users"),
             expected_type=list[dict],
         )
-        discovered = discovered_peers(discovery_resource.id.agent_name, peers, users)
+        discovered = discovered_peers(discovery_resource.agent_name, peers, users)
         ctx.info("Discovered %(count)d peers", count=len(discovered))
 
         try:
@@ -1513,7 +1521,7 @@ class PeerDiscoveryHandler(
                 client.discovered_resources_get_batch(
                     tid=tid,
                     filter={
-                        "agent": [discovery_resource.id.agent_name],
+                        "agent": [discovery_resource.agent_name],
                         "resource_type": ["netbird::Peer"],
                     },
                 ),
