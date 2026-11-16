@@ -19,7 +19,6 @@ Contact: edvgui@gmail.com
 import collections.abc
 import json
 
-import inmanta_plugins.std
 import pytest_inmanta.plugin
 import requests
 from conftest import DEFAULT_GROUP, facts, get
@@ -112,19 +111,28 @@ def test_values_the_api_computes_are_not_a_change(
     is something the model has an opinion about, so none of them may show up as a
     change, and the ones the api takes on a write are carried along untouched.
     """
-    netbird.post(
-        f"{netbird.base_url}/groups",
+    # The api refuses a resource it doesn't hold: the group gets a real one, by
+    # being one of the groups of a network resource
+    created = netbird.post(f"{netbird.base_url}/groups", json={"name": GROUP_NAME})
+    created.raise_for_status()
+    network = netbird.post(f"{netbird.base_url}/networks", json={"name": "computed"})
+    network.raise_for_status()
+    resource = netbird.post(
+        f"{netbird.base_url}/networks/{network.json()['id']}/resources",
         json={
-            "name": GROUP_NAME,
-            "resources": [{"id": "unknown-resource", "type": "host"}],
+            "name": "computed",
+            "address": "10.10.10.10/32",
+            "enabled": True,
+            "groups": [created.json()["id"]],
         },
-    ).raise_for_status()
+    )
+    resource.raise_for_status()
 
     compile_model(group_model(peers=[]))
     project.deploy_resource("netbird::Group", change=const.Change.nochange)
 
     group = find_group(netbird, GROUP_NAME)
-    assert group["resources"] == [{"id": "unknown-resource", "type": "host"}]
+    assert group["resources"] == [{"id": resource.json()["id"], "type": "host"}]
     assert group["issued"] == "api"
 
 
@@ -160,5 +168,8 @@ def test_id_is_a_fact_reference(
 
     (group,) = project.get_instances("netbird::Group")
     object_id = inmanta.plugins.allow_reference_values(group).id
-    assert isinstance(object_id, inmanta_plugins.std.FactReference)
+    # Each compile reloads the plugins: the class of this compile
+    from inmanta_plugins.std import FactReference
+
+    assert isinstance(object_id, FactReference)
     assert object_id.fact_name == "id"

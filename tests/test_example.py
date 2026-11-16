@@ -23,7 +23,6 @@ import json
 import pathlib
 import subprocess
 
-import inmanta_plugins.files
 import pytest
 import pytest_inmanta.plugin
 import requests
@@ -345,7 +344,10 @@ def test_netbird_client(
     assert len(project.get_instances("files::TextFile")) == len(CLIENT_HOSTNAMES)
     for env_file in project.get_instances("files::TextFile"):
         content = inmanta.plugins.allow_reference_values(env_file).content
-        assert isinstance(content, inmanta_plugins.files.JinjaReference)
+        # Each compile reloads the plugins: the class of this compile
+        from inmanta_plugins.files import JinjaReference
+
+        assert isinstance(content, JinjaReference)
 
     # The containers are not resources, the quadlet unit files they render into are, and
     # those are what point the clients at their environment files.
