@@ -554,31 +554,35 @@ index AccountSettings(api)
 implement AccountSettings using parents
 
 
-entity PeerDiscovery extends ResourceABC:
+entity PeerDiscovery extends std::DiscoveryResource:
     """
-    Discover the peers of the netbird account, without managing anything: the
-    resource only reads the account, and publishes what it found as the fact
-    `peers`, so a model can map the overlay address of a client back to the peer it
-    belongs to and the user owning that peer.
+    Discover the peers of the netbird account, and the user owning each of them.  It
+    manages nothing: every deploy reports the peers to the orchestrator as discovered
+    resources, and deletes the ones it reported before that left the account.
 
     Api documentation: https://docs.netbird.io/api/resources/peers and
     https://docs.netbird.io/api/resources/users
 
-    The fact is a json list, sorted by address, with one object per peer:
-    `id`, `name`, `hostname`, `ip`, `ipv6` (null when the peer has none), `user_id` and
-    `user_email`.  The user is null for a peer registered with a setup key, and the
-    email for a service user, which has none.  Point at it with
-    `std::create_fact_reference(<discovery>, "peers")`.
+    A peer is reported under the id of the netbird::Peer resource that would manage it,
+    netbird::Peer[<agent>,hostname=<hostname>], when no other peer has the same hostname,
+    and as netbird::Peer[<agent>,id=<id>] otherwise.  Its values are `id`, `name`,
+    `hostname`, `ip`, `ipv6` (null when the peer has none), `user_id` and `user_email`:
+    the user is null for a peer registered with a setup key, and the email for a service
+    user, which has none.
 
-    The fact is the account as it was when the resource was last deployed: a peer
-    that joins since shows up on the next deploy.  Purging the resource does nothing,
-    there is nothing in the account it owns.
+    The discovered peers are the account as it was at the last deploy: a peer that joins
+    since shows up on the next one.
     """
 end
 
+PeerDiscovery.api [1] -- Api
+"""
+The api whose account the peers are discovered in.
+"""
+
 index PeerDiscovery(api)
 
-implement PeerDiscovery using parents
+implement PeerDiscovery using std::none
 
 
 entity DnsZone extends JsonObjectABC:

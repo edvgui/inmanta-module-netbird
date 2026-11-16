@@ -16,7 +16,9 @@ limitations under the License.
 Contact: edvgui@gmail.com
 """
 
+import collections.abc
 import copy
+import functools
 import ipaddress
 import json
 import typing
@@ -32,15 +34,18 @@ import inmanta.export
 import inmanta.plugins
 import inmanta.resources
 from inmanta import const
+from inmanta.types import BaseModel, ResourceIdStr
 from inmanta.util import dict_path
 from inmanta_plugins.netbird.helpers import Session
 
+if typing.TYPE_CHECKING:
+    from inmanta.data.model import DiscoveredResourceOutput
+    from inmanta.protocol.common import PageableClientCall
 
-class ResourceABC(
-    inmanta.resources.PurgeableResource, inmanta.resources.ManagedResource
-):
+
+class ApiResource(inmanta.resources.Resource):
     """
-    Base exporter class for all netbird resources.
+    Base exporter class for every resource talking to the netbird api.
     """
 
     # inmanta infers the type of the parent's fields from its own literal, which
@@ -48,10 +53,31 @@ class ResourceABC(
     fields: tuple[str, ...] = (  # type: ignore[assignment]
         "management_url",
         "api_token",
-        "desired_state",
     )
     management_url: str
     api_token: str
+
+    @classmethod
+    def get_management_url(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity.api.management_url
+
+    @classmethod
+    def get_api_token(
+        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
+    ) -> str:
+        return entity.api.api_token
+
+
+class ResourceABC(
+    ApiResource, inmanta.resources.PurgeableResource, inmanta.resources.ManagedResource
+):
+    """
+    Base exporter class for all the netbird objects.
+    """
+
+    fields: tuple[str, ...] = ("desired_state",)  # type: ignore[assignment]
 
     # The json object the model wants, serialized from the entity itself: every
     # netbird object is a json object, and the resource is its own desired state.
@@ -66,18 +92,6 @@ class ResourceABC(
         cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
     ) -> list[dict]:
         return [asdict(s) for s in serialize_for_resource(entity.root, entity)]
-
-    @classmethod
-    def get_management_url(
-        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
-    ) -> str:
-        return entity.api.management_url
-
-    @classmethod
-    def get_api_token(
-        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
-    ) -> str:
-        return entity.api.api_token
 
 
 T = typing.TypeVar("T")
@@ -161,15 +175,17 @@ def find_group(session: Session, name: str) -> dict | None:
     return next((g for g in groups if g["name"] == name), None)
 
 
+AR = typing.TypeVar("AR", bound=ApiResource)
 NR = typing.TypeVar("NR", bound=ResourceABC)
 
 
-class HandlerABC(inmanta.agent.handler.CRUDHandler[NR]):
+class SessionHandlerABC(inmanta.agent.handler.HandlerAPI[AR]):
     """
-    Base handler containing the basic logic to interact with the netbird api.
+    Base handler setting up the session towards the netbird api, shared by the crud
+    handlers of the objects and by the discovery handlers.
     """
 
-    # Set up in pre, before any of the crud methods runs
+    # Set up in pre, before the handler does anything else
     session: Session
 
     @inmanta.agent.handler.cache(
@@ -190,10 +206,16 @@ class HandlerABC(inmanta.agent.handler.CRUDHandler[NR]):
 
         return session
 
-    def pre(self, ctx: inmanta.agent.handler.HandlerContext, resource: NR) -> None:
+    def pre(self, ctx: inmanta.agent.handler.HandlerContext, resource: AR) -> None:
         # Setup the session object that can be used to access the netbird api
         self.session = self.get_session(resource.management_url, resource.api_token)
         self.session.logger = ctx
+
+
+class HandlerABC(SessionHandlerABC[NR], inmanta.agent.handler.CRUDHandler[NR]):
+    """
+    Base handler containing the basic logic to interact with the netbird api.
+    """
 
     def post(self, ctx: inmanta.agent.handler.HandlerContext, resource: NR) -> None:
         if ctx.change in (const.Change.created, const.Change.updated):
@@ -1348,39 +1370,75 @@ class AccountSettingsHandler(HandlerABC[AccountSettingsResource]):
         )
 
 
-def discovered_peers(peers: list[dict], users: list[dict]) -> list[dict]:
+class DiscoveredPeer(BaseModel):
     """
-    The peers of the account, as the peer discovery publishes them: what identifies a
-    peer and who owns it, the user's email joined in from the users of the account.
-    Sorted by address, so that the fact only changes when the account does.
+    A peer of the account, as the peer discovery reports it: what identifies it, and
+    who owns it.  The user is None for a peer registered with a setup key, and the
+    email for a service user, which has none.
+    """
 
+    id: str
+    name: str
+    hostname: str
+    ip: str
+    ipv6: str | None
+    user_id: str | None
+    user_email: str | None
+
+
+def discovered_peers(
+    agent_name: str, peers: list[dict], users: list[dict]
+) -> dict[ResourceIdStr, DiscoveredPeer]:
+    """
+    The peers of the account, with the email of their user joined in from the users of
+    the account.
+
+    A peer is reported under the id of the netbird::Peer resource that would manage it
+    (netbird::Peer[<agent>,hostname=<hostname>]) when no other peer reports the same
+    hostname, so the server links it to that resource when the orchestrator manages
+    it.  It is reported under the id netbird gave it otherwise
+    (netbird::Peer[<agent>,id=<id>]): the api keeps no hostname unique, and a hostname
+    two peers share identifies neither.
+
+    :param agent_name: The agent of the api, the agent of the peer resources.
     :param peers: The peers, as the api lists them.
     :param users: The users, regular and service ones, as the api lists them.
     """
     emails = {user["id"]: user.get("email") or None for user in users}
-    return sorted(
-        (
-            {
-                "id": peer["id"],
-                "name": peer["name"],
-                "hostname": peer["hostname"],
-                "ip": peer["ip"],
-                "ipv6": peer.get("ipv6") or None,
-                # A peer registered with a setup key has no user
-                "user_id": peer.get("user_id") or None,
-                "user_email": emails.get(peer.get("user_id")),
-            }
-            for peer in peers
-        ),
-        key=lambda peer: ipaddress.ip_address(peer["ip"]),
-    )
+    hostnames = collections.Counter(peer["hostname"] for peer in peers)
+
+    discovered: dict[ResourceIdStr, DiscoveredPeer] = {}
+    for peer in peers:
+        hostname = peer["hostname"]
+        # The value of an id can not be empty, nor hold a ]
+        if hostname and "]" not in hostname and hostnames[hostname] == 1:
+            discovered_id = inmanta.resources.Id(
+                "netbird::Peer", agent_name, "hostname", hostname
+            )
+        else:
+            discovered_id = inmanta.resources.Id(
+                "netbird::Peer", agent_name, "id", peer["id"]
+            )
+
+        discovered[discovered_id.resource_str()] = DiscoveredPeer(
+            id=peer["id"],
+            name=peer["name"],
+            hostname=hostname,
+            ip=peer["ip"],
+            ipv6=peer.get("ipv6") or None,
+            # A peer registered with a setup key has no user
+            user_id=peer.get("user_id") or None,
+            user_email=emails.get(peer.get("user_id")),
+        )
+
+    return discovered
 
 
 @inmanta.resources.resource("netbird::PeerDiscovery", "agent_name", "api.agent_name")
-class PeerDiscoveryResource(ResourceABC):
+class PeerDiscoveryResource(ApiResource, inmanta.resources.DiscoveryResource):
     # The discovery is about the whole account, the agent managing the api is what
     # tells two of them apart.
-    fields = ("agent_name",)
+    fields: tuple[str, ...] = ("agent_name",)  # type: ignore[assignment]
     agent_name: str
 
     @classmethod
@@ -1389,22 +1447,22 @@ class PeerDiscoveryResource(ResourceABC):
     ) -> str:
         return entity.api.agent_name
 
-    @classmethod
-    def get_desired_state(
-        cls, _: inmanta.export.Exporter, entity: inmanta.execute.proxy.DynamicProxy
-    ) -> list[dict]:
-        # Nothing is managed: the body read from the api is the desired state as it
-        # is, so there is never a change to make
-        return []
 
-
-@inmanta.agent.handler.provider("netbird::PeerDiscovery", "")
-class PeerDiscoveryHandler(HandlerABC[PeerDiscoveryResource]):
-    def read_resource(
+# Core only types its provider decorator for resource handlers, it registers any handler
+@inmanta.agent.handler.provider("netbird::PeerDiscovery", "")  # type: ignore[arg-type]
+class PeerDiscoveryHandler(
+    SessionHandlerABC[PeerDiscoveryResource],
+    inmanta.agent.handler.DiscoveryHandler[PeerDiscoveryResource, DiscoveredPeer],
+):
+    def discover_resources(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
-        resource: PeerDiscoveryResource,
-    ) -> None:
+        discovery_resource: PeerDiscoveryResource,
+    ) -> collections.abc.Mapping[ResourceIdStr, DiscoveredPeer]:
+        """
+        Read the peers and delete the stale discovered ones, core's execute reports the
+        peers this returns.
+        """
         peers = process_netbird_response(
             self.session.get(url="peers"),
             expected_type=list[dict],
@@ -1413,31 +1471,83 @@ class PeerDiscoveryHandler(HandlerABC[PeerDiscoveryResource]):
             self.session.get(url="users"),
             expected_type=list[dict],
         )
-        resource.body = {"peers": discovered_peers(peers, users)}
-        self.publish_facts(ctx, resource.body)
+        discovered = discovered_peers(discovery_resource.id.agent_name, peers, users)
+        ctx.info("Discovered %(count)d peers", count=len(discovered))
 
-    def create_resource(
+        try:
+            self.delete_stale_discovered_resources(
+                ctx, discovery_resource, discovered.keys()
+            )
+        except Exception as e:
+            # Failing to clean up must not prevent reporting the peers
+            ctx.warning(
+                "Failed to delete the stale discovered peers: %(exception)s",
+                exception=f"{e.__class__.__name__}('{e}')",
+            )
+
+        return discovered
+
+    def delete_stale_discovered_resources(
         self,
         ctx: inmanta.agent.handler.HandlerContext,
-        resource: PeerDiscoveryResource,
+        discovery_resource: PeerDiscoveryResource,
+        discovered: collections.abc.Collection[ResourceIdStr],
     ) -> None:
-        raise RuntimeError("The peer discovery only reads the account")
+        """
+        Delete the peers this discovery reported in a previous run but didn't find
+        anymore.  The server only adds and overwrites the discovered resources it
+        receives: it would keep listing the peers that left the account, and the old id
+        of a peer reported under another id since.
 
-    def update_resource(
-        self,
-        ctx: inmanta.agent.handler.HandlerContext,
-        changes: dict,
-        resource: PeerDiscoveryResource,
-    ) -> None:
-        raise RuntimeError("The peer discovery only reads the account")
+        :param discovery_resource: The discovery that is running.
+        :param discovered: The ids of the peers this run found.
+        """
+        client = self.get_client()
+        tid = self._agent.environment
+        discovery_resource_id = discovery_resource.id.resource_str()
 
-    def delete_resource(
-        self,
-        ctx: inmanta.agent.handler.HandlerContext,
-        resource: PeerDiscoveryResource,
-    ) -> None:
-        # It owns nothing in the account: purged, there is nothing to remove
-        pass
+        async def reported_on_agent() -> list["DiscoveredResourceOutput"]:
+            # The client is typed for any method, this one is paged
+            call = typing.cast(
+                "PageableClientCall[DiscoveredResourceOutput]",
+                client.discovered_resources_get_batch(
+                    tid=tid,
+                    filter={
+                        "agent": [discovery_resource.id.agent_name],
+                        "resource_type": ["netbird::Peer"],
+                    },
+                ),
+            )
+            return [reported async for reported in call.all()]
+
+        # The filters match partially (netbird::Peer would match a netbird::PeerX
+        # too), and other discoveries may report peers on the same agent: only
+        # consider the peers this discovery reported.
+        stale = sorted(
+            reported.discovered_resource_id
+            for reported in self.run_sync(reported_on_agent)
+            if reported.discovery_resource_id == discovery_resource_id
+            and reported.discovered_resource_id not in discovered
+        )
+        if not stale:
+            return
+
+        ctx.info(
+            "Deleting %(count)d discovered peers not found anymore: %(stale)s",
+            count=len(stale),
+            stale=stale,
+        )
+        result = self.run_sync(
+            functools.partial(
+                client.discovered_resource_delete_batch,
+                tid=tid,
+                discovered_resource_ids=stale,
+            )
+        )
+        if result.code != 200:
+            raise RuntimeError(
+                f"Failed to delete the stale discovered peers: {result.result}"
+            )
 
 
 # The keys of the zone object the api takes.  It takes the same ones on a create and
