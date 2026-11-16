@@ -51,8 +51,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install system dependencies
-        # curl to bootstrap uv, python to run the tests with
-        run: dnf install -y curl python3.13
+        # curl to bootstrap uv, python to run the tests with, util-linux for su (not in
+        # the base image since fedora 45)
+        run: dnf install -y curl python3.13 util-linux
 
       - name: Run tests
         # Rootless podman refuses to run as root, so run the whole test suite as the

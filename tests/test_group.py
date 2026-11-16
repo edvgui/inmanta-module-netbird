@@ -19,7 +19,6 @@ Contact: edvgui@gmail.com
 import collections.abc
 import json
 
-import inmanta_plugins.std
 import pytest_inmanta.plugin
 import requests
 from conftest import DEFAULT_GROUP, facts, get
@@ -160,5 +159,8 @@ def test_id_is_a_fact_reference(
 
     (group,) = project.get_instances("netbird::Group")
     object_id = inmanta.plugins.allow_reference_values(group).id
-    assert isinstance(object_id, inmanta_plugins.std.FactReference)
+    # Each compile reloads the plugins: the class of this compile
+    from inmanta_plugins.std import FactReference
+
+    assert isinstance(object_id, FactReference)
     assert object_id.fact_name == "id"
