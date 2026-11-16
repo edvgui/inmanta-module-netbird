@@ -78,6 +78,23 @@ compile time, and only when the store is non-empty already: seed the fact **befo
 compile that builds the reference.  A reference compiled with nothing seeded falls back to
 a real orchestrator client and fails the deploy with a bare `KeyError: 'data'`.
 
+## Discovery resources
+
+`netbird::PeerDiscovery` extends `std::DiscoveryResource` (its own `api` relation, it is not
+a `ResourceABC`), and its handler is a core `DiscoveryHandler` mixed with
+`SessionHandlerABC`, which holds the api session the crud `HandlerABC` uses too.  Modelled
+on the openstack module (`openstack::discovery`):
+
+- `discover_resources` returns the peers keyed by the id of the `netbird::Peer` resource
+  that would manage them (`hostname=`), or by `id=` when a hostname is shared or can't be
+  an id value, so the server links a discovered peer to the managed one.
+- It deletes the discovered peers **this** discovery reported before and didn't find now
+  (`delete_stale_discovered_resources`: `discovered_resources_get_batch(...).all()`
+  filtered on agent and type, then `discovered_resource_delete_batch`); the server only adds
+  and overwrites.  A failed cleanup is a warning, never a failed report.
+- Tests: `project.deploy_resource_v2(...).discovered_resources` for the report (pytest-inmanta's
+  `MockClient` collects them), a stub client for the cleanup (`tests/test_peer_discovery.py`).
+
 ## Adding a resource for another api object
 
 1. **Probe the real api first.**  The docs at `https://docs.netbird.io/api/resources/*`
